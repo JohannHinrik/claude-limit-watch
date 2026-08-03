@@ -1,4 +1,7 @@
 {
+  "permissions": {
+    "allow": ["CronCreate"]
+  },
   "statusLine": {
     "type": "command",
     "command": "node ~/.claude/hooks/limit-statusline.mjs",

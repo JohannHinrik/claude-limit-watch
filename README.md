@@ -37,6 +37,34 @@ instruction (about 120 tokens) plus one CronCreate call when it trips.
 Requires node on PATH and a claude.ai subscription (rate limits only appear
 in the status line for Pro/Max accounts).
 
+### Required permission: CronCreate
+
+The nudge only works if the model is actually allowed to call `CronCreate`.
+Hooks themselves run outside the permission system and are never blocked,
+but the CronCreate tool call they request is subject to your permission
+mode. In modes that never prompt (auto / dontAsk), a non-allowlisted
+CronCreate is silently denied and the resume cron is never created — the
+injected message tells the model to ignore the nudge if the tool is
+unavailable, so there is no visible error.
+
+`settings.example.json` therefore ships with:
+
+```json
+"permissions": { "allow": ["CronCreate"] }
+```
+
+Keep that block when merging, or add `CronCreate` to your existing allow
+list.
+
+### Verifying it works
+
+- `~/.claude/rate-limit-state.json` should appear (and refresh) while an
+  interactive session with the status line is open.
+- Once a session crosses the threshold, a mark file appears in
+  `~/.claude/limit-watch-marks/` named `<session-id>-<reset-epoch>`. A mark
+  with no scheduled cron means the CronCreate call was denied — check the
+  allowlist above.
+
 ## Tuning
 
 Constants at the top of `hooks/limit-watch.mjs`:
