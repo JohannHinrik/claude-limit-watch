@@ -58,8 +58,8 @@ status line script (merging with any custom status line you already have) and
 adds `CronCreate` to your permission allowlist, asking for your approval where
 the permission system requires it.
 
-Requires node on PATH and a claude.ai subscription (rate limits only appear
-in the status line for Pro/Max accounts).
+Requires node >= 18 on PATH and a claude.ai subscription (rate limits only
+appear in the status line for Pro/Max accounts).
 
 ## Manual install (alternative)
 
