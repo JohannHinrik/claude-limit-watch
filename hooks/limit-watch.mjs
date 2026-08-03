@@ -16,6 +16,12 @@ let input = {};
 try { input = JSON.parse(readFileSync(0, 'utf8')); } catch {}
 const event = input.hook_event_name === 'Stop' ? 'Stop' : 'PostToolUse';
 
+// Subagents carry agent_id/agent_type in hook input; the main loop carries
+// neither. Only the main loop can call CronCreate, so stay silent in
+// subagents: the injection would read as a prompt-injection attempt there,
+// and acting on the marker would starve the main loop of its nudge.
+if (input.agent_id || input.agent_type) process.exit(0);
+
 const claudeDir = join(homedir(), '.claude');
 let state = null;
 try { state = JSON.parse(readFileSync(join(claudeDir, 'rate-limit-state.json'), 'utf8')); } catch {}
