@@ -47,11 +47,16 @@ const runsInstalledCopy = (cmd, name) =>
 console.log('claude-limit-watch installer\n');
 
 // Refuse to touch a settings file we cannot parse — rebuilding from {} would
-// wipe every setting the user has.
+// wipe every setting the user has. A top-level null/array/string is just as
+// unusable as a syntax error: assigning keys onto it crashes or gets silently
+// dropped by JSON.stringify.
+const isSettingsObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 let settings = {};
 if (existsSync(settingsPath)) {
   try {
-    settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    if (!isSettingsObject(parsed)) throw new Error('top-level value is not an object');
+    settings = parsed;
   } catch (e) {
     console.error(`Cannot parse ${settingsPath}: ${e.message}`);
     console.error('Fix the JSON (or move the file aside) and re-run.');
@@ -59,8 +64,10 @@ if (existsSync(settingsPath)) {
   }
 }
 
-// Copy a bundled script into ~/.claude/hooks, asking before replacing an
-// existing copy that differs (it may be customized or tuned).
+// Copy a bundled script into ~/.claude/hooks. An existing copy that differs
+// may be customized/tuned OR simply outdated, so updating must stay possible
+// under --yes (otherwise upgrades silently no-op forever): default yes, but
+// always preserve the old copy next to it and say so.
 async function installScript(name) {
   const dest = join(hooksDir, name);
   const src = readFileSync(join(here, 'hooks', name), 'utf8');
@@ -68,10 +75,13 @@ async function installScript(name) {
   try { existing = readFileSync(dest, 'utf8'); } catch {}
   if (existing === src) return;
   if (existing !== null) {
-    if (!await confirm(`Existing ${dest} differs from the bundled version (it may be customized or tuned). Overwrite it?`, false)) {
+    console.log(`\n${dest} differs from the bundled version (customized, tuned, or outdated).`);
+    if (!await confirm(`Update it? (the old copy is kept at ${name}.bak — re-apply any tuning after)`)) {
       console.log('Kept your existing script.');
       return;
     }
+    writeFileSync(`${dest}.bak`, existing);
+    console.log(`Old copy saved to ${dest}.bak`);
   }
   mkdirSync(hooksDir, { recursive: true });
   writeFileSync(dest, src);
@@ -84,23 +94,36 @@ let setStatusLine = false;
 let addCron = false;
 let watchdogActive = false;
 
-const manualEntryFor = (hooks, name) =>
-  ['PostToolUse', 'Stop'].every(ev =>
+const WATCHDOG_EVENTS = ['PostToolUse', 'Stop'];
+const wiredEvents = (hooks, name) =>
+  WATCHDOG_EVENTS.filter(ev =>
     (hooks?.[ev] || []).some(m => (m.hooks || []).some(h => runsInstalledCopy(h.command, name))));
 
 // --- 1. Watchdog: plugin (recommended) or manual hook wiring ---
 const pluginEnabled = settings.enabledPlugins?.['limit-watch@limit-watch'] === true;
-const manualWired = manualEntryFor(settings.hooks, 'limit-watch.mjs');
+const wired = wiredEvents(settings.hooks, 'limit-watch.mjs');
 if (pluginEnabled) {
   console.log('Watchdog plugin already installed and enabled.');
   watchdogActive = true;
-  if (manualWired) {
-    console.log('Note: the watchdog is ALSO wired manually in settings.json — remove the');
-    console.log('manual PostToolUse/Stop entries so it does not run twice per event.');
+  if (wired.length > 0) {
+    console.log(`Note: the watchdog is ALSO wired manually in settings.json (${wired.join(', ')}) —`);
+    console.log('remove the manual entries so it does not run twice per event.');
   }
-} else if (manualWired) {
+} else if (wired.length === WATCHDOG_EVENTS.length) {
   console.log('Watchdog hooks already wired in settings.json.');
+  await installScript('limit-watch.mjs');
   watchdogActive = true;
+} else if (wired.length > 0) {
+  // Half-wired manual install (e.g. a partial settings merge): completing it
+  // beats recommending the plugin, which would run the watchdog twice.
+  console.log(`Watchdog hooks are only partially wired (missing ${WATCHDOG_EVENTS.filter(ev => !wired.includes(ev)).join(', ')}).`);
+  if (await confirm('Complete the manual wiring in ~/.claude/settings.json?')) {
+    await installScript('limit-watch.mjs');
+    if (existsSync(join(hooksDir, 'limit-watch.mjs'))) {
+      wireManual = true;
+      watchdogActive = true;
+    }
+  }
 } else if (has('claude')) {
   if (await confirm('Install the watchdog as a Claude Code plugin (recommended)?')) {
     console.log('\nRegistering marketplace (already-added is fine):');
@@ -158,12 +181,15 @@ if (!(settings.permissions?.allow || []).includes('CronCreate')) {
 if (wireManual || setStatusLine || addCron) {
   let fresh = settings;
   if (existsSync(settingsPath)) {
-    try { fresh = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
+    try {
+      const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      if (isSettingsObject(parsed)) fresh = parsed;
+    } catch {}
   }
-  if (wireManual && !manualEntryFor(fresh.hooks, 'limit-watch.mjs')) {
+  if (wireManual) {
     const entry = { matcher: '', hooks: [{ type: 'command', command: scriptCmd('limit-watch.mjs'), timeout: 10 }] };
     fresh.hooks = fresh.hooks || {};
-    for (const ev of ['PostToolUse', 'Stop']) {
+    for (const ev of WATCHDOG_EVENTS) {
       const arr = fresh.hooks[ev] || [];
       if (!arr.some(m => (m.hooks || []).some(h => runsInstalledCopy(h.command, 'limit-watch.mjs')))) {
         fresh.hooks[ev] = [...arr, entry];
