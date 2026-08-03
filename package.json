@@ -1,0 +1,14 @@
+{
+  "name": "claude-limit-watch",
+  "version": "0.1.0",
+  "description": "Auto-resume Claude Code sessions that hit the 5-hour usage limit",
+  "type": "module",
+  "bin": {
+    "claude-limit-watch": "./install.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JohannHinrik/claude-limit-watch.git"
+  },
+  "license": "MIT"
+}

@@ -26,7 +26,24 @@ No LLM is involved in the hook itself. It is a plain Node process, silent and
 free on every event below the threshold. The only token cost is the injected
 instruction (about 120 tokens) plus one CronCreate call when it trips.
 
-## Install (plugin)
+## Install (one command)
+
+```sh
+npx github:JohannHinrik/claude-limit-watch
+```
+
+(or `git clone` this repo and run `node install.mjs`; add `--yes` to accept
+all defaults non-interactively)
+
+The installer runs in your shell, outside Claude Code's permission system, so
+it can do everything in one guided pass: register the plugin via the `claude`
+CLI (or fall back to wiring the hooks into settings directly if the CLI is
+missing), install the status line — asking before touching an existing custom
+one or an edited script — and add `CronCreate` to your permission allowlist.
+Your previous settings are backed up to `~/.claude/settings.json.bak`, and
+re-running is a no-op.
+
+## Install (plugin, from inside Claude Code)
 
 ```
 /plugin marketplace add JohannHinrik/claude-limit-watch
