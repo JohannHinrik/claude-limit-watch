@@ -2,7 +2,7 @@
 // Status line for Claude Code. Besides rendering the line, it caches the
 // rate_limits block from stdin to ~/.claude/rate-limit-state.json so the
 // limit-watch hook (which never receives rate limits itself) can read it.
-import { readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -40,4 +40,16 @@ const fh = fmt(rl?.five_hour);
 if (fh) parts.push(`5h ${fh}`);
 const sd = fmt(rl?.seven_day);
 if (sd) parts.push(`7d ${sd}`);
+
+// limit-watch drops a mark file per session+reset window when its nudge has
+// fired; surface that as an "armed" flag so the trigger is visible here.
+try {
+  let r = rl?.five_hour?.resets_at;
+  if (typeof r === 'number' && r > 1e12) r = Math.floor(r / 1000);
+  if (input.session_id && typeof r === 'number') {
+    statSync(join(homedir(), '.claude', 'limit-watch-marks', `${input.session_id}-${r}`));
+    parts.push('⏰ resume armed');
+  }
+} catch {}
+
 process.stdout.write(parts.join(' · '));
