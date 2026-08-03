@@ -1,0 +1,11 @@
+{
+  "name": "limit-watch",
+  "version": "0.1.0",
+  "description": "Auto-resume Claude Code sessions that hit the 5-hour usage limit",
+  "author": {
+    "name": "JohannHinrik",
+    "url": "https://github.com/JohannHinrik"
+  },
+  "homepage": "https://github.com/JohannHinrik/claude-limit-watch",
+  "keywords": ["rate-limit", "auto-resume", "hooks", "statusline"]
+}

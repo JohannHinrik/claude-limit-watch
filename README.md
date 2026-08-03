@@ -26,16 +26,31 @@ No LLM is involved in the hook itself. It is a plain Node process, silent and
 free on every event below the threshold. The only token cost is the injected
 instruction (about 120 tokens) plus one CronCreate call when it trips.
 
-## Install
+## Install (plugin)
+
+```
+/plugin marketplace add JohannHinrik/claude-limit-watch
+/plugin install limit-watch@limit-watch
+/limit-watch:setup
+```
+
+Installing the plugin registers the PostToolUse/Stop watchdog hooks
+automatically. Plugins cannot set a status line or grant permissions, so the
+`/limit-watch:setup` command finishes those two pieces — it installs the
+status line script (merging with any custom status line you already have) and
+adds `CronCreate` to your permission allowlist, asking for your approval where
+the permission system requires it.
+
+Requires node on PATH and a claude.ai subscription (rate limits only appear
+in the status line for Pro/Max accounts).
+
+## Manual install (alternative)
 
 1. Copy `hooks/` into `~/.claude/hooks/`.
 2. Merge `settings.example.json` into `~/.claude/settings.json` (user level,
    applies to every project). Keep your existing keys.
 3. Already-running sessions hot-reload the change; if one does not, open
    `/hooks` in it once, or restart it.
-
-Requires node on PATH and a claude.ai subscription (rate limits only appear
-in the status line for Pro/Max accounts).
 
 ### Required permission: CronCreate
 

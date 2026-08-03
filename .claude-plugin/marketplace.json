@@ -1,0 +1,15 @@
+{
+  "name": "limit-watch",
+  "description": "Auto-resume for Claude Code sessions that hit the 5-hour usage limit",
+  "owner": {
+    "name": "JohannHinrik",
+    "url": "https://github.com/JohannHinrik"
+  },
+  "plugins": [
+    {
+      "name": "limit-watch",
+      "source": "./",
+      "description": "Auto-resume Claude Code sessions that hit the 5-hour usage limit"
+    }
+  ]
+}
