@@ -13,7 +13,7 @@ const statePath = join(homedir(), '.claude', 'rate-limit-state.json');
 const rl = input.rate_limits;
 if (rl && typeof rl === 'object') {
   try {
-    const tmp = statePath + '.tmp';
+    const tmp = `${statePath}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify({ updated_at: Math.floor(Date.now() / 1000), rate_limits: rl }));
     renameSync(tmp, statePath);
   } catch {}
