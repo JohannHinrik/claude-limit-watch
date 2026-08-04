@@ -2,9 +2,10 @@
 description: One-time setup for limit-watch — install the status line and CronCreate permission
 ---
 
-The limit-watch plugin's PostToolUse/Stop hooks are already active (plugins
-register hooks automatically). Two pieces cannot ship inside a plugin and must
-be added to the user's settings. Complete them now:
+The limit-watch plugin's hooks are already active (plugins register hooks
+automatically): the PostToolUse/Stop watchdog and the PreToolUse agent gate.
+Two pieces cannot ship inside a plugin and must be added to the user's
+settings. Complete them now:
 
 ## 1. Install the status line script
 
@@ -36,15 +37,17 @@ Read the existing file and preserve every key you do not change. Apply:
     "refreshInterval": 60
   },
   "permissions": {
-    "allow": ["CronCreate"]
+    "allow": ["CronCreate", "CronList", "CronDelete"]
   }
 }
 ```
 
-For `permissions.allow`, append `"CronCreate"` to any existing array rather
-than replacing it. The permission is required because in non-prompting
-permission modes a non-allowlisted CronCreate call is silently denied and the
-auto-resume cron is never created.
+For `permissions.allow`, append the three Cron entries to any existing array
+rather than replacing it. CronCreate schedules the auto-resume; CronDelete
+(with CronList to find the job id) lets the model cancel a resume cron that
+turned out not to be needed because the task finished before the limit. In
+non-prompting permission modes a non-allowlisted tool call is silently
+denied, so without these the auto-resume never gets created or cancelled.
 
 If the permission system denies your settings edit (auto mode blocks
 self-permission changes), do NOT work around it: print the exact merged JSON

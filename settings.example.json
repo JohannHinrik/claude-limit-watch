@@ -1,6 +1,6 @@
 {
   "permissions": {
-    "allow": ["CronCreate"]
+    "allow": ["CronCreate", "CronList", "CronDelete"]
   },
   "statusLine": {
     "type": "command",
@@ -8,6 +8,18 @@
     "refreshInterval": 60
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Agent|Task|Workflow)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/limit-guard.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "",

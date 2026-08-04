@@ -1,30 +1,64 @@
 # claude-limit-watch
 
-Auto-resume for Claude Code sessions that hit the 5-hour usage limit.
+Auto-resume for Claude Code sessions that hit the 5-hour usage limit —
+now with burn-rate prediction, graceful wind-down, and an agent gate.
 
-When a session crosses 85% of the 5-hour window, a hook tells the model to
-schedule a one-shot in-session cron (via the CronCreate tool) that fires
-`continue` two minutes after the window resets. A session that later freezes
-at 100% mid-task wakes up on its own and finishes the work.
+The watchdog tracks how fast the 5-hour window is being consumed, not just
+where it stands. A huge task burning 5%/min gets its auto-resume armed at 60%
+instead of being caught mid-freeze; a slow chat session at 88% with a flat
+burn is left alone until the static threshold. If a burst armed the resume
+early and then the task finished below the limit, the session is asked to
+cancel the now-unneeded cron. When 100% is genuinely imminent, new subagent
+launches are paused so the freeze does not orphan a fan-out of half-done
+agents.
 
 ## How it works
 
 Claude Code never passes rate-limit data to hooks. Only the status line
-receives it. So the setup is two small Node scripts:
+receives it. So the setup is three small Node scripts:
 
 - `hooks/limit-statusline.mjs` renders a status line (model, directory,
-  5-hour and 7-day usage with reset times) and, on every refresh, caches the
-  `rate_limits` block from stdin to `~/.claude/rate-limit-state.json`.
+  5-hour and 7-day usage with reset times, plus wind-down/gate flags) and, on
+  every refresh, caches the `rate_limits` block to
+  `~/.claude/rate-limit-state.json` and appends a usage sample to
+  `~/.claude/limit-watch-history.json`.
 - `hooks/limit-watch.mjs` runs on `PostToolUse` (every tool call, empty
-  matcher) and on `Stop`. It reads the cache; at or above the threshold it
-  injects `additionalContext` instructing the model to call CronCreate with a
-  schedule computed as reset time plus two minutes and the prompt `continue`,
-  as its next tool call. It nags at most once per cooldown per session per
-  reset window, and re-arms automatically each new window.
+  matcher) and on `Stop`. It fits a burn rate (least-squares slope over the
+  last 10 minutes of samples), projects when the window hits 100%, and
+  computes a tier, published to `~/.claude/limit-watch-tier.json`:
 
-No LLM is involved in the hook itself. It is a plain Node process, silent and
-free on every event below the threshold. The only token cost is the injected
-instruction (about 120 tokens) plus one CronCreate call when it trips.
+  | Tier | Trigger (whichever comes first) | Action |
+  |---|---|---|
+  | `winddown` | projected 100% in < 40 min (before the reset), or ≥ 70% used | one advisory: finish in-flight units, avoid new fan-outs, checkpoint progress |
+  | `arm` | projected 100% in < 20 min, or ≥ 85% used | inject the resume nudge: call CronCreate, schedule = reset + 2 min |
+  | `imminent` | projected 100% in < 10 min, or ≥ 93% used | `limit-guard.mjs` pauses new agent launches |
+
+  On `Stop`, if this session armed a resume earlier in the window but the
+  burn has since flattened below the arm tier (a projection-based arm whose
+  burst ended), it asks the model — once per window — to `CronDelete` the
+  cron if the task is actually complete. Arming eagerly and cancelling on a
+  clean finish is deliberate: a stray cron costs one tool call, a missed one
+  costs a frozen, orphaned session. As extra insurance, the cron's prompt
+  itself says "if the task was already complete, reply briefly and stop", so
+  any stray that slips through costs one sentence in the fresh window.
+- `hooks/limit-guard.mjs` runs on `PreToolUse` for `Agent`/`Task`/`Workflow`.
+  At the `imminent` tier it denies **new** agent and workflow launches with a
+  reason telling the model to work inline or wait for the reset; agents
+  already running finish normally. It fails open (missing/stale tier file
+  gates nothing) and can be disabled with `LIMIT_WATCH_NO_GATE=1`.
+
+Everything is account-global by construction: the cache, history, and tier
+files live in `~/.claude/`, so every session on the machine — including
+background jobs, which run hooks but no status line — sees the same tier at
+the same moment. The tier file is refreshed on subagent tool calls too, so it
+stays current even during long fan-out turns. Each session still schedules
+its own resume cron (crons live in session memory; that is a platform
+constraint).
+
+No LLM is involved in the hooks themselves. They are plain Node processes,
+silent and free on every event below the wind-down tier. The token cost is
+one advisory (~90 tokens) plus the resume nudge (~150 tokens) and one
+CronCreate call when they trip.
 
 ## Install (one command)
 
@@ -38,12 +72,13 @@ all defaults non-interactively)
 The installer runs in your shell, outside Claude Code's permission system, so
 it can do everything in one guided pass: register the plugin via the `claude`
 CLI (or fall back to wiring the hooks into settings directly if the CLI is
-missing), install the status line and add `CronCreate` to your permission
+missing), install the status line and add the Cron tools to your permission
 allowlist. An existing custom status line is kept unless you opt in; an
 edited or outdated hook script is updated with the old copy saved next to it
 as `<name>.bak`, so upgrades work non-interactively without losing your
 tuning. Your previous settings are backed up to `~/.claude/settings.json.bak`,
-and re-running is a no-op.
+and re-running is a no-op. Re-running on an existing install also offers the
+pieces added since (the agent gate, the extra Cron permissions).
 
 ## Install (plugin, from inside Claude Code)
 
@@ -53,12 +88,12 @@ and re-running is a no-op.
 /limit-watch:setup
 ```
 
-Installing the plugin registers the PostToolUse/Stop watchdog hooks
+Installing the plugin registers the PreToolUse/PostToolUse/Stop hooks
 automatically. Plugins cannot set a status line or grant permissions, so the
 `/limit-watch:setup` command finishes those two pieces — it installs the
 status line script (merging with any custom status line you already have) and
-adds `CronCreate` to your permission allowlist, asking for your approval where
-the permission system requires it.
+adds the Cron tools to your permission allowlist, asking for your approval
+where the permission system requires it.
 
 Requires node >= 18 on PATH and a claude.ai subscription (rate limits only
 appear in the status line for Pro/Max accounts).
@@ -71,33 +106,37 @@ appear in the status line for Pro/Max accounts).
 3. Already-running sessions hot-reload the change; if one does not, open
    `/hooks` in it once, or restart it.
 
-### Required permission: CronCreate
+### Required permissions: CronCreate, CronList, CronDelete
 
-The nudge only works if the model is actually allowed to call `CronCreate`.
-Hooks themselves run outside the permission system and are never blocked,
-but the CronCreate tool call they request is subject to your permission
+The nudges only work if the model is actually allowed to call the Cron
+tools. Hooks themselves run outside the permission system and are never
+blocked, but the tool calls they request are subject to your permission
 mode. In modes that never prompt (auto / dontAsk), a non-allowlisted
 CronCreate is silently denied and the resume cron is never created — the
 injected message tells the model to ignore the nudge if the tool is
-unavailable, so there is no visible error.
+unavailable, so there is no visible error. CronDelete and CronList are what
+let a session cancel a resume cron that turned out not to be needed.
 
 `settings.example.json` therefore ships with:
 
 ```json
-"permissions": { "allow": ["CronCreate"] }
+"permissions": { "allow": ["CronCreate", "CronList", "CronDelete"] }
 ```
 
-Keep that block when merging, or add `CronCreate` to your existing allow
-list.
+Keep that block when merging, or add the entries to your existing allow list.
 
 ### Verifying it works
 
-- `~/.claude/rate-limit-state.json` should appear (and refresh) while an
-  interactive session with the status line is open.
-- Once a session crosses the threshold, a mark file appears in
-  `~/.claude/limit-watch-marks/` named `<session-id>-<reset-epoch>`. A mark
-  with no scheduled cron means the CronCreate call was denied — check the
-  allowlist above.
+- `~/.claude/rate-limit-state.json` and `~/.claude/limit-watch-history.json`
+  should appear (and refresh) while an interactive session with the status
+  line is open.
+- `~/.claude/limit-watch-tier.json` appears once any session makes a tool
+  call; it records the current tier, percentage, slope and projection.
+- Once a session arms, a mark file appears in `~/.claude/limit-watch-marks/`
+  named `<session-id>-<reset-epoch>` (with `.winddown` / `.cancel` variants
+  for the other one-shot nudges), and the status line shows `⏰ resume
+  armed`. A mark with no scheduled cron means the CronCreate call was
+  denied — check the allowlist above.
 
 ## Tuning
 
@@ -105,25 +144,44 @@ Constants at the top of `hooks/limit-watch.mjs`:
 
 | Constant | Default | Meaning |
 |---|---|---|
-| `THRESHOLD` | 85 | percent of the 5-hour window that triggers the nudge |
+| `WINDDOWN_PCT` | 70 | percent that triggers the wind-down advisory |
+| `THRESHOLD` | 85 | percent that arms the resume cron |
+| `GATE_PCT` | 93 | percent at which new agent launches are paused |
+| `WINDDOWN_LEAD_S` | 2400 | wind down when 100% is projected within 40 min |
+| `ARM_LEAD_S` | 1200 | arm when 100% is projected within 20 min |
+| `GATE_LEAD_S` | 600 | gate when 100% is projected within 10 min |
+| `LOOKBACK_S` | 600 | slope is fitted over this many seconds of samples |
+| `MIN_RISE_PCT` | 2 | minimum rise across the lookback before the slope is trusted |
 | `FIRE_AFTER_S` | 120 | how long after the reset the cron fires |
-| `RENOTIFY_S` | 300 | repeat the nudge if a turn ignored it |
+| `RENOTIFY_S` | 300 | repeat the arm nudge if a turn ignored it |
+
+Predictive triggers only fire when the projection also lands *before* the
+window reset — a burst that would coast past the reset boundary is left
+alone. `hooks/limit-guard.mjs` has `TIER_TTL_S` (600): how stale a published
+tier may be before the gate fails open. `LIMIT_WATCH_NO_GATE=1` in the
+environment disables the gate entirely.
 
 The scripts are re-executed on every event, so edits apply to all sessions
 immediately, no reload needed.
 
 ## Caveats
 
-- The cache is written only by interactive sessions (headless and background
-  agents run no status line). Keep one interactive session open and the
-  account-wide cache stays fresh for every agent on the machine.
+- The cache and history are written only by interactive sessions (headless
+  and background agents run no status line). Keep one interactive session
+  open and the account-wide state stays fresh for every agent on the
+  machine — prediction is blind exactly when the cache is stale.
+- `used_percentage` may be integer-granular; the slope fit refuses to
+  extrapolate from less than a 2% rise, so very short bursts fall back to the
+  static thresholds.
 - CronCreate jobs live in the session's memory. The session process must stay
   alive (terminal, tmux pane or background job still open) until the cron
-  fires, and its permission mode must allow CronCreate.
-- Each session past the threshold schedules its own resume. A session that
-  finishes before freezing still gets a stray `continue` after the reset,
-  which is harmless.
-- If a single huge turn blows from below the threshold straight through 100%,
-  the cron may never get created. Lower `THRESHOLD` for more headroom.
+  fires, and its permission mode must allow the Cron tools.
+- Each session past the arm tier schedules its own resume. A session that
+  finishes early is asked to cancel its cron only when the burn rate visibly
+  flattened; one that finishes while still above the arm threshold keeps its
+  cron, and the resume prompt makes that stray cost a one-sentence turn.
+- The agent gate blocks new `Agent`/`Task`/`Workflow` tool calls only. Agents
+  already in flight, and agents spawned internally by an already-running
+  workflow, are not interrupted.
 
 Tested on Claude Code 2.1.220.

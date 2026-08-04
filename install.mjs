@@ -90,9 +90,11 @@ async function installScript(name) {
 // Decisions are recorded here and applied to a fresh read of settings.json at
 // the very end, so a long prompt pause can't clobber concurrent changes.
 let wireManual = false;
+let wireGuard = false;
 let setStatusLine = false;
-let addCron = false;
+let addPerms = [];
 let watchdogActive = false;
+let pluginFresh = false; // plugin installed by THIS run, so already current
 
 const WATCHDOG_EVENTS = ['PostToolUse', 'Stop'];
 const wiredEvents = (hooks, name) =>
@@ -131,6 +133,7 @@ if (pluginEnabled) {
     console.log('\nInstalling plugin:');
     if (run('claude', ['plugin', 'install', 'limit-watch@limit-watch'])) {
       watchdogActive = true;
+      pluginFresh = true;
     } else {
       console.log('\nPlugin install failed; you can wire the hooks directly instead.');
     }
@@ -143,6 +146,27 @@ if (!watchdogActive && await confirm('Wire the watchdog hooks directly into ~/.c
   if (existsSync(join(hooksDir, 'limit-watch.mjs'))) {
     wireManual = true;
     watchdogActive = true;
+  }
+}
+
+// --- 1b. Agent gate (limit-guard.mjs on PreToolUse) ---
+// Pauses new Agent/Task/Workflow launches when a freeze is imminent, so the
+// limit does not catch a fan-out of subagents mid-task. Ships in the plugin's
+// hooks.json (nothing to wire); manual installs need an explicit entry.
+if (pluginEnabled && !pluginFresh) {
+  // A plugin installed before the gate existed only picks it up on update.
+  if (await confirm('Update the plugin to the latest version (adds burn-rate prediction and the agent gate)?')) {
+    run('claude', ['plugin', 'install', 'limit-watch@limit-watch']);
+  }
+} else if (watchdogActive && !pluginFresh) {
+  const guardWired = (settings.hooks?.PreToolUse || []).some(m =>
+    (m.hooks || []).some(h => runsInstalledCopy(h.command, 'limit-guard.mjs')));
+  if (guardWired) {
+    console.log('Agent gate hook already wired; checking the installed script.');
+    await installScript('limit-guard.mjs');
+  } else if (await confirm('Wire the agent gate hook (pauses new subagent launches when a freeze is imminent)?')) {
+    await installScript('limit-guard.mjs');
+    if (existsSync(join(hooksDir, 'limit-guard.mjs'))) wireGuard = true;
   }
 }
 
@@ -170,15 +194,19 @@ if (runsInstalledCopy(current, 'limit-statusline.mjs')) {
   }
 }
 
-// --- 3. CronCreate permission ---
-if (!(settings.permissions?.allow || []).includes('CronCreate')) {
-  console.log('\nThe model must be allowed to call CronCreate, otherwise non-prompting');
-  console.log('permission modes silently deny the auto-resume cron.');
-  if (await confirm('Add CronCreate to permissions.allow?')) addCron = true;
+// --- 3. Cron tool permissions ---
+const CRON_PERMS = ['CronCreate', 'CronList', 'CronDelete'];
+const missingPerms = CRON_PERMS.filter(p => !(settings.permissions?.allow || []).includes(p));
+if (missingPerms.length) {
+  console.log('\nThe model must be allowed to call the Cron tools: CronCreate schedules');
+  console.log('the auto-resume, and CronDelete (with CronList to find the job) cancels');
+  console.log('it when a task finishes before the limit. Non-prompting permission modes');
+  console.log('silently deny non-allowlisted tools.');
+  if (await confirm(`Add ${missingPerms.join(', ')} to permissions.allow?`)) addPerms = missingPerms;
 }
 
 // --- 4. Apply decisions to a fresh read of settings.json ---
-if (wireManual || setStatusLine || addCron) {
+if (wireManual || wireGuard || setStatusLine || addPerms.length) {
   let fresh = settings;
   if (existsSync(settingsPath)) {
     try {
@@ -196,13 +224,22 @@ if (wireManual || setStatusLine || addCron) {
       }
     }
   }
+  if (wireGuard) {
+    const entry = { matcher: '^(Agent|Task|Workflow)$', hooks: [{ type: 'command', command: scriptCmd('limit-guard.mjs'), timeout: 10 }] };
+    fresh.hooks = fresh.hooks || {};
+    const arr = fresh.hooks.PreToolUse || [];
+    if (!arr.some(m => (m.hooks || []).some(h => runsInstalledCopy(h.command, 'limit-guard.mjs')))) {
+      fresh.hooks.PreToolUse = [...arr, entry];
+    }
+  }
   if (setStatusLine) {
     fresh.statusLine = { type: 'command', command: scriptCmd('limit-statusline.mjs'), refreshInterval: 60 };
   }
-  if (addCron) {
+  if (addPerms.length) {
     const allow = fresh.permissions?.allow || [];
-    if (!allow.includes('CronCreate')) {
-      fresh.permissions = { ...(fresh.permissions || {}), allow: [...allow, 'CronCreate'] };
+    const toAdd = addPerms.filter(p => !allow.includes(p));
+    if (toAdd.length) {
+      fresh.permissions = { ...(fresh.permissions || {}), allow: [...allow, ...toAdd] };
     }
   }
   mkdirSync(claudeDir, { recursive: true });
