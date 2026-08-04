@@ -159,12 +159,12 @@ if (!watchdogActive && await confirm('Wire the watchdog hooks directly into ~/.c
 }
 
 // Best-effort version of the already-installed plugin, so re-runs stay a
-// no-op when it is current. Only plugins/cache counts: sessions execute from
-// the versioned cache, and the marketplace clone under plugins/marketplaces
-// updates ahead of it — scanning that would report an update as already
-// installed while every session still runs the old cached version. The dir
-// layout is not a stable contract, hence the bounded scan; not finding it
-// just means offering the update.
+// no-op when it is current. installed_plugins.json is the registry sessions
+// actually load from, so it is checked first; the cache scan is a fallback.
+// Neither the marketplace clone (updates ahead of the install) nor a merely
+// materialized cache dir prove anything by themselves — only the registry
+// pointer does. None of these paths are a stable contract, hence best-effort;
+// not finding a version just means offering the update.
 const verGte = (a, b) => {
   const [x, y] = [String(a).split('.'), String(b).split('.')];
   for (let i = 0; i < 3; i++) {
@@ -175,6 +175,14 @@ const verGte = (a, b) => {
 };
 function installedPluginVersion() {
   let best = null;
+  try {
+    const reg = JSON.parse(readFileSync(join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf8'));
+    const entries = reg.plugins?.['limit-watch@limit-watch'] ?? reg['limit-watch@limit-watch'];
+    for (const e of Array.isArray(entries) ? entries : []) {
+      if (typeof e?.version === 'string' && (!best || verGte(e.version, best))) best = e.version;
+    }
+    if (best) return best;
+  } catch {}
   const walk = (dir, depth) => {
     let entries;
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -204,7 +212,12 @@ if (pluginEnabled) {
   if (installed && verGte(installed, bundled)) {
     console.log(`Plugin already at version ${installed}; nothing to update.`);
   } else if (await confirm(`Update the plugin to the bundled version (${bundled})?`)) {
-    run('claude', ['plugin', 'install', 'limit-watch@limit-watch']);
+    // `plugin install` on an already-installed plugin never moves the version
+    // pointer in installed_plugins.json; only `plugin update` does.
+    run('claude', ['plugin', 'marketplace', 'update', 'limit-watch']);
+    if (run('claude', ['plugin', 'update', 'limit-watch@limit-watch'])) {
+      console.log('Updated. Restart running sessions to load the new version.');
+    }
   }
 } else if (watchdogActive && !pluginFresh) {
   const guardWired = manifestEntries('limit-guard.mjs').every(e => isWired(settings.hooks, e.event, 'limit-guard.mjs'));
