@@ -1,6 +1,6 @@
 {
   "name": "limit-watch",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Auto-resume Claude Code sessions that hit the 5-hour usage limit, with burn-rate prediction, graceful wind-down and an agent gate",
   "author": {
     "name": "JohannHinrik",

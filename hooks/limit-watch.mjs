@@ -41,6 +41,17 @@ const LOOKBACK_S = 600;
 const MIN_SAMPLES = 4;
 const MIN_SPAN_S = 120;
 const MIN_RISE_PCT = 2;
+// Pace fallback (claude-pace's idea): when the slope fit lacks samples, use
+// the window-average rate — pct consumed over time elapsed since the window
+// opened. It needs only the current snapshot, and it understates a fresh
+// burst (idle time dilutes the average), so it arms later than a real slope
+// would: a conservative fallback, never the preferred source.
+const WINDOW_S = 18000;
+const PACE_MIN_ELAPSED_S = 600;
+// Nudges warn when the cache driving them is older than this — tiers still
+// fire (pct only rises within a window, so old data understates), but the
+// user should know the numbers are behind.
+const STALE_WARN_S = 600;
 // The published tier carries expires = min(now + TIER_TTL_S, resets);
 // consumers only compare against it, so freshness is defined here alone.
 // While the cached inputs are unchanged and the publication is younger than
@@ -67,8 +78,13 @@ if (!Number.isFinite(resets)) process.exit(0);
 const now = Math.floor(Date.now() / 1000);
 if (resets + FIRE_AFTER_S <= now) process.exit(0); // stale cache from an old window
 
+const cacheAge = Number.isFinite(state.updated_at) ? Math.max(0, now - state.updated_at) : null;
+const staleNote = cacheAge !== null && cacheAge > STALE_WARN_S
+  ? ` (note: the rate-limit data behind this is ${Math.round(cacheAge / 60)} min old — keep an interactive session open to keep it fresh)`
+  : '';
+
 const tierPath = join(claudeDir, 'limit-watch-tier.json');
-let tier = 'none', slope = null, secsTo100 = null, reused = false;
+let tier = 'none', slope = null, secsTo100 = null, source = null, reused = false;
 try {
   const prev = JSON.parse(readFileSync(tierPath, 'utf8'));
   // The inputs only move when the status line rewrites the cache; while they
@@ -78,6 +94,7 @@ try {
     tier = prev.tier;
     slope = Number.isFinite(prev.slope) ? prev.slope : null;
     secsTo100 = Number.isFinite(prev.secs_to_100) ? prev.secs_to_100 : null;
+    source = typeof prev.source === 'string' ? prev.source : null;
     reused = true;
   }
 } catch {}
@@ -100,6 +117,15 @@ if (!reused) {
       }
     }
   } catch {}
+  if (slope) {
+    source = 'slope';
+  } else {
+    const elapsed = WINDOW_S - (resets - now);
+    if (elapsed >= PACE_MIN_ELAPSED_S && elapsed <= WINDOW_S && pct >= MIN_RISE_PCT) {
+      slope = pct / elapsed;
+      source = 'pace';
+    }
+  }
   secsTo100 = slope ? Math.max(0, (100 - pct) / slope) : null;
   const projBefore = secsTo100 !== null && now + secsTo100 < resets;
 
@@ -114,7 +140,7 @@ if (!reused) {
   try {
     const tmp = `${tierPath}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify({
-      t: now, expires: Math.min(now + TIER_TTL_S, resets), tier, pct, resets, slope, secs_to_100: secsTo100
+      t: now, expires: Math.min(now + TIER_TTL_S, resets), tier, pct, resets, slope, secs_to_100: secsTo100, source, cache_age: cacheAge
     }));
     renameSync(tmp, tierPath);
   } catch {}
@@ -160,7 +186,8 @@ const pruneOldMarks = () => {
 
 const pctR = Math.round(pct);
 const mins = secsTo100 !== null ? Math.max(1, Math.round(secsTo100 / 60)) : null;
-const projNote = mins !== null ? `, burning ~${(slope * 60).toFixed(1)}%/min (projected to hit 100% in ~${mins} min)` : '';
+const verb = source === 'pace' ? 'averaging' : 'burning';
+const projNote = mins !== null ? `, ${verb} ~${(slope * 60).toFixed(1)}%/min (projected to hit 100% in ~${mins} min)` : '';
 
 // Cancel path: this session armed a resume cron earlier in the window, the
 // burn has since flattened below the arm tier (only possible for a
@@ -193,7 +220,7 @@ if (tier === 'winddown') {
   if (event !== 'PostToolUse') process.exit(0);
   try { writeFileSync(`${armMark}.winddown`, '', { flag: 'wx' }); } catch { process.exit(0); }
   pruneOldMarks();
-  const msg = `[limit-watch] Heads-up: the 5-hour usage window is at ${pctR}%${projNote}. Wind down gracefully: finish in-flight units before starting new ones, avoid launching new large subagent fan-outs, and checkpoint progress into a handoff note at \`${handoff}\` — the task in progress, what is done, the exact next step — so an interruption at 100% can resume cleanly. Advisory only — a resume nudge follows automatically if usage keeps climbing.`;
+  const msg = `[limit-watch] Heads-up: the 5-hour usage window is at ${pctR}%${projNote}. Wind down gracefully: finish in-flight units before starting new ones, avoid launching new large subagent fan-outs, and checkpoint progress into a handoff note at \`${handoff}\` — the task in progress, what is done, the exact next step — so an interruption at 100% can resume cleanly. Advisory only — a resume nudge follows automatically if usage keeps climbing.${staleNote}`;
   process.stdout.write(JSON.stringify({
     suppressOutput: true,
     hookSpecificOutput: { hookEventName: event, additionalContext: msg }
@@ -224,7 +251,7 @@ if (event === 'Stop') {
       pruneOldMarks();
       process.stdout.write(JSON.stringify({
         decision: 'block',
-        reason: `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} — this session must not go idle without its auto-resume. If you have NOT already created the limit-watch resume cron for this reset window, create it now: call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` (fires at ${hh}:${mm}, 2 minutes after the reset), then write the handoff note at \`${handoff}\` — task in progress, what is done, the exact next step — and stop. If that cron already exists (use CronList if unsure), or Cron tools are unavailable, just stop.`
+        reason: `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} — this session must not go idle without its auto-resume. If you have NOT already created the limit-watch resume cron for this reset window, create it now: call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` (fires at ${hh}:${mm}, 2 minutes after the reset), then write the handoff note at \`${handoff}\` — task in progress, what is done, the exact next step — and stop. If that cron already exists (use CronList if unsure), or Cron tools are unavailable, just stop.${staleNote}`
       }));
       process.exit(0);
     } catch {}
@@ -243,7 +270,7 @@ try {
 recordTmuxPane();
 pruneOldMarks();
 
-const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` That fires at ${hh}:${mm}, 2 minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Right after the CronCreate, write (or refresh) the handoff note at \`${handoff}\`: the task in progress, what is already done, and the exact next step — and keep it current as work advances. Then keep working while budget remains, preferring to finish in-flight work over starting new subagent fan-outs.`;
+const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` That fires at ${hh}:${mm}, 2 minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Right after the CronCreate, write (or refresh) the handoff note at \`${handoff}\`: the task in progress, what is already done, and the exact next step — and keep it current as work advances. Then keep working while budget remains, preferring to finish in-flight work over starting new subagent fan-outs.${staleNote}`;
 
 process.stdout.write(JSON.stringify({
   suppressOutput: true,

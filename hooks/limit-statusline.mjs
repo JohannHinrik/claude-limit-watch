@@ -55,15 +55,30 @@ try {
   }
 } catch {}
 
-function fmt(win) {
+// Relative time reads faster under pressure than an absolute clock time.
+const rel = (secs) => {
+  const m = Math.max(0, Math.ceil(secs / 60));
+  if (m >= 2880) return `${Math.round(m / 1440)}d`;
+  if (m >= 60) return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
+  return `${m}m`;
+};
+
+// windowS: full window length, for the pace arrow (claude-pace's idea) —
+// usage % vs. elapsed % of the window. ⇡ = burning faster than the window
+// is passing, ⇣ = headroom; small deltas are noise and stay hidden.
+function fmt(win, windowS) {
   if (!win || typeof win.used_percentage !== 'number') return null;
   const r = toSec(win.resets_at);
   const pct = Math.round(win.used_percentage);
   if (r === null) return `${pct}%`;
-  const d = new Date(r * 1000);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${pct}% (resets ${hh}:${mm})`;
+  let s = `${pct}%`;
+  const elapsed = windowS - (r - now);
+  if (elapsed > 0 && elapsed <= windowS) {
+    const delta = Math.round(win.used_percentage - (elapsed / windowS) * 100);
+    if (delta >= 5) s += ` ⇡${delta}%`;
+    else if (delta <= -5) s += ` ⇣${-delta}%`;
+  }
+  return `${s} (resets in ${rel(r - now)})`;
 }
 
 const parts = [];
@@ -71,9 +86,9 @@ const model = input.model?.display_name || input.model?.id;
 if (model) parts.push(model);
 const dir = (input.workspace?.current_dir || input.cwd || '').split('/').filter(Boolean).pop();
 if (dir) parts.push(dir);
-const fh = fmt(rl?.five_hour);
+const fh = fmt(rl?.five_hour, 18000);
 if (fh) parts.push(`5h ${fh}`);
-const sd = fmt(rl?.seven_day);
+const sd = fmt(rl?.seven_day, 604800);
 if (sd) parts.push(`7d ${sd}`);
 
 // limit-watch publishes the account-wide tier it computed, stamped with its
@@ -93,7 +108,8 @@ try {
   const r = toSec(rl?.five_hour?.resets_at);
   if (input.session_id && r !== null) {
     statSync(join(claudeRoot, 'limit-watch-marks', `${input.session_id}-${r}`));
-    parts.push('⏰ resume armed');
+    // + 120 mirrors limit-watch.mjs FIRE_AFTER_S (the cron's delay past reset)
+    parts.push(`⏰ resume in ${rel(r + 120 - now)}`);
   }
 } catch {}
 

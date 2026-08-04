@@ -17,6 +17,13 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const RESUME_AFTER_S = 300; // fire this long after the reset (cron fires at 120s)
+// The resume is only typed when the limit freeze is visibly on screen
+// (claude-auto-continue's idea): capture-pane text must match this before we
+// touch the pane. Fails toward skipping — a finished session, a fresh Claude
+// that took over the pane, or a session the in-session cron already resumed
+// shows no limit message and is left alone. Tune here if the wording changes.
+const LIMIT_RE = /(usage|rate|session|5-hour|weekly) limit|limit (reached|reset|will reset)|out of (usage|quota)|hit your.*limit/i;
+const CAPTURE_LINES = 2000; // scrollback depth searched for the message
 
 const markDir = join(homedir(), '.claude', 'limit-watch-marks');
 const now = Math.floor(Date.now() / 1000);
@@ -45,6 +52,8 @@ for (const f of files) {
     // means the session ended and the shell (or another program) owns it now.
     const cmd = tmux(['display-message', '-p', '-t', info.pane, '#{pane_current_command}']);
     if (!/^(claude|node)$/.test(cmd)) { done(`skip:${cmd}`); continue; }
+    const screen = tmux(['capture-pane', '-p', '-t', info.pane, '-S', `-${CAPTURE_LINES}`]);
+    if (!LIMIT_RE.test(screen)) { done('skip:no-limit-message'); continue; }
     const prompt = `Resumed by limit-watch (tmux fallback): the usage window has reset. Read the handoff note at ${base}.md if it exists and resume from its next step; otherwise continue the interrupted task if any work remains. If everything was already complete, or an in-session resume already fired, reply briefly and stop.`;
     tmux(['send-keys', '-t', info.pane, '-l', prompt]);
     tmux(['send-keys', '-t', info.pane, 'Enter']);

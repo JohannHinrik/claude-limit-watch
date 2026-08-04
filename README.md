@@ -20,14 +20,20 @@ Claude Code never passes rate-limit data to hooks. Only the status line
 receives it. So the setup is four small Node scripts:
 
 - `hooks/limit-statusline.mjs` renders a status line (model, directory,
-  5-hour and 7-day usage with reset times, plus wind-down/gate flags) and, on
-  every refresh, caches the `rate_limits` block to
+  5-hour and 7-day usage with reset countdowns, a pace arrow — `⇡8%` when
+  usage is running ahead of the window's elapsed time, `⇣` for headroom —
+  plus wind-down/gate flags and a "resume in Xm" countdown once armed) and,
+  on every refresh, caches the `rate_limits` block to
   `~/.claude/rate-limit-state.json` and appends a usage sample to
   `~/.claude/limit-watch-history.json`.
 - `hooks/limit-watch.mjs` runs on `PostToolUse` (every tool call, empty
   matcher) and on `Stop`. It fits a burn rate (least-squares slope over the
-  last 10 minutes of samples), projects when the window hits 100%, and
-  computes a tier, published to `~/.claude/limit-watch-tier.json`:
+  last 10 minutes of samples; when too few samples exist, it falls back to
+  the window-average pace — usage over time elapsed — which needs only the
+  current snapshot and deliberately understates a fresh burst), projects
+  when the window hits 100%, and computes a tier, published to
+  `~/.claude/limit-watch-tier.json`. Nudges driven by a cache more than 10
+  minutes old say so, so stale data diagnoses itself:
 
   | Tier | Trigger (whichever comes first) | Action |
   |---|---|---|
@@ -68,8 +74,11 @@ receives it. So the setup is four small Node scripts:
   session arms, the watchdog drops a `.tmux` sidecar recording the hosting
   pane (hooks inherit `$TMUX`/`$TMUX_PANE`); five minutes after the reset —
   strictly later than the cron's two, so it stays the fallback — the resumer
-  types the resume prompt into panes still running a Claude process, once per
-  window (`.resumed` sidecar). If both paths fire, the duplicate costs one
+  checks that the pane still runs a Claude process **and that the limit
+  freeze is visibly on screen** (`capture-pane` against a message pattern),
+  then types the resume prompt, once per window (`.resumed` sidecar). No
+  limit message means the session finished, already resumed, or was replaced
+  by a fresh Claude — all left alone; the check fails toward skipping. If both paths fire, the duplicate costs one
   short reply. When the burn flattens and the cron gets cancelled, the
   sidecar is deleted too — deterministically, since unlike the cron it needs
   no model cooperation. Installed by `install.mjs` (launchd agent
@@ -185,14 +194,18 @@ Constants at the top of `hooks/limit-watch.mjs`:
 | `LOOKBACK_S` | 600 | slope is fitted over this many seconds of samples (keep below the status line's `HIST_KEEP_S`, 2700, or older samples won't exist) |
 | `TIER_TTL_S` | 600 | published tier expires this long after it was computed |
 | `MIN_RISE_PCT` | 2 | minimum rise across the lookback before the slope is trusted |
+| `PACE_MIN_ELAPSED_S` | 600 | window-average pace fallback needs at least this much of the window elapsed |
+| `STALE_WARN_S` | 600 | nudges note the cache age when it exceeds this |
 | `FIRE_AFTER_S` | 120 | how long after the reset the cron fires |
 | `RENOTIFY_S` | 300 | repeat the arm nudge if a turn ignored it |
 
-And one in `hooks/limit-resume.mjs`:
+And in `hooks/limit-resume.mjs`:
 
 | Constant | Default | Meaning |
 |---|---|---|
 | `RESUME_AFTER_S` | 300 | how long after the reset the tmux fallback types the resume (keep above `FIRE_AFTER_S` so the in-session cron goes first) |
+| `LIMIT_RE` | (pattern) | the on-screen limit message that must be visible before the resume is typed; update here if Claude Code's wording changes |
+| `CAPTURE_LINES` | 2000 | scrollback depth searched for that message |
 
 Predictive triggers only fire when the projection also lands *before* the
 window reset — a burst that would coast past the reset boundary is left
@@ -210,10 +223,13 @@ immediately, no reload needed.
 - The cache and history are written only by interactive sessions (headless
   and background agents run no status line). Keep one interactive session
   open and the account-wide state stays fresh for every agent on the
-  machine — prediction is blind exactly when the cache is stale.
+  machine. Tiers still fire off an old cache (usage only rises within a
+  window, so stale data understates), and any nudge built on data more than
+  10 minutes old says so in the message.
 - `used_percentage` may be integer-granular; the slope fit refuses to
-  extrapolate from less than a 2% rise, so very short bursts fall back to the
-  static thresholds.
+  extrapolate from less than a 2% rise, so very short bursts fall back to
+  the window-average pace, and below `PACE_MIN_ELAPSED_S` of elapsed window,
+  to the static thresholds.
 - CronCreate jobs live in the session's memory. The session process must stay
   alive (terminal, tmux pane or background job still open) until the cron
   fires, and its permission mode must allow the Cron tools. The tmux fallback
