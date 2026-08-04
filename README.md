@@ -43,6 +43,7 @@ receives it. So the setup is four small Node scripts:
   | `winddown` | projected 100% in < 40 min (before the reset), or ≥ 70% used | one advisory: finish in-flight units, avoid new fan-outs, start a handoff note |
   | `arm` | projected 100% in < 20 min, or ≥ 85% used | inject the resume nudge: call CronCreate (schedule = reset + 2 min), then write/refresh the handoff note; a Stop at this tier is blocked once per window until the cron exists |
   | `imminent` | projected 100% in < 10 min, or ≥ 93% used | `limit-guard.mjs` pauses new agent launches |
+  | `brake` | projected 100% in < 2.5 min, or ≥ 97% used | **opt-in**: `limit-guard.mjs` denies every tool call but the resume-arming ones, so the session ends its turn and goes idle |
 
   On `Stop`, if this session armed a resume earlier in the window but the
   burn has since flattened below the arm tier (a projection-based arm whose
@@ -64,11 +65,29 @@ receives it. So the setup is four small Node scripts:
   task in progress, what is done, the exact next step), and the cron's prompt
   points back at it. A session that froze mid-task and was compacted
   overnight resumes with intent instead of re-deriving where it was.
-- `hooks/limit-guard.mjs` runs on `PreToolUse` for `Agent`/`Task`/`Workflow`.
-  At the `imminent` tier it denies **new** agent and workflow launches with a
-  reason telling the model to work inline or wait for the reset; agents
-  already running finish normally. It fails open (missing/stale tier file
-  gates nothing) and can be disabled with `LIMIT_WATCH_NO_GATE=1`.
+- `hooks/limit-guard.mjs` runs on `PreToolUse`. At the `imminent` tier it
+  denies **new** agent and workflow launches with a reason telling the model
+  to work inline or wait for the reset; agents already running finish
+  normally.
+
+  At the `brake` tier — **off unless you set `LIMIT_WATCH_BRAKE=1`** — it
+  denies *every* tool call except the ones that arm the resume (the Cron
+  tools, `Read`, `TodoWrite`, and writes to the marks directory for the
+  handoff note). A model that cannot act wraps up and ends its turn, so the
+  session goes **idle** rather than freezing mid-turn: hitting the limit puts
+  up a blocking choice modal, and while that modal waits for a keypress the
+  REPL is never idle — which is the one state in-session crons need to fire.
+  Braking early trades the last few percent of a window for a resume that can
+  actually happen. It is opt-in because it halts a session that still had
+  budget left, and it is account-wide, so every session brakes at once. Add
+  it to `~/.claude/settings.json` to enable:
+
+  ```json
+  "env": { "LIMIT_WATCH_BRAKE": "1" }
+  ```
+
+  Both levels fail open (missing/stale tier file gates nothing) and
+  `LIMIT_WATCH_NO_GATE=1` disables the guard entirely.
 - `hooks/limit-resume.mjs` is the **external tmux fallback** — the only piece
   that runs *outside* Claude Code (launchd on macOS, once a minute; cron it
   yourself elsewhere). It covers what no in-session mechanism can: a monster
@@ -206,9 +225,11 @@ Constants at the top of `hooks/limit-watch.mjs`:
 | `WINDDOWN_PCT` | 70 | percent that triggers the wind-down advisory |
 | `THRESHOLD` | 85 | percent that arms the resume cron |
 | `GATE_PCT` | 93 | percent at which new agent launches are paused |
+| `BRAKE_PCT` | 97 | percent at which all tool calls stop (opt-in) |
 | `WINDDOWN_LEAD_S` | 2400 | wind down when 100% is projected within 40 min |
 | `ARM_LEAD_S` | 1200 | arm when 100% is projected within 20 min |
 | `GATE_LEAD_S` | 600 | gate when 100% is projected within 10 min |
+| `BRAKE_LEAD_S` | 150 | brake when 100% is projected within 2.5 min (opt-in) |
 | `LOOKBACK_S` | 600 | slope is fitted over this many seconds of samples (keep below the status line's `HIST_KEEP_S`, 2700, or older samples won't exist) |
 | `TIER_TTL_S` | 600 | published tier expires this long after it was computed |
 | `MIN_RISE_PCT` | 2 | minimum rise across the lookback before the slope is trusted |

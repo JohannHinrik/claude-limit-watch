@@ -11,6 +11,9 @@
 //             cannot go idle without its resume cron even if every
 //             PostToolUse nudge was ignored
 //   imminent  limit-guard.mjs pauses new agent launches
+//   brake     limit-guard.mjs denies all tool calls but the resume-arming
+//             ones, so the session ends its turn instead of freezing mid-turn
+//             behind the limit modal (which no automatic resume can dismiss)
 //
 // Each tier trips on a static percentage OR on a burn-rate projection: when
 // the recent slope says the window hits 100% before it resets and within the
@@ -28,11 +31,13 @@ import { join } from 'node:path';
 const WINDDOWN_PCT = 70;
 const THRESHOLD = 85;     // arm tier (name kept from earlier versions)
 const GATE_PCT = 93;
+const BRAKE_PCT = 97;     // deny all tool calls; the session must go idle
 // Predictive leads: tier fires when the projected time to 100% drops below
 // this many seconds (and 100% lands before the reset).
 const WINDDOWN_LEAD_S = 2400;
 const ARM_LEAD_S = 1200;
 const GATE_LEAD_S = 600;
+const BRAKE_LEAD_S = 150;
 // Slope fit: samples from the last LOOKBACK_S (keep below the status line's
 // HIST_KEEP_S, which bounds how much history survives); trusted only with at
 // least MIN_SAMPLES points spanning MIN_SPAN_S seconds and MIN_RISE_PCT
@@ -141,6 +146,7 @@ if (!reused) {
   if (pct >= WINDDOWN_PCT || (projBefore && secsTo100 < WINDDOWN_LEAD_S)) tier = 'winddown';
   if (pct >= THRESHOLD || (projBefore && secsTo100 < ARM_LEAD_S)) tier = 'arm';
   if (pct >= GATE_PCT || (projBefore && secsTo100 < GATE_LEAD_S)) tier = 'imminent';
+  if (pct >= BRAKE_PCT || (projBefore && secsTo100 < BRAKE_LEAD_S)) tier = 'brake';
 
   // Publish before the subagent check: subagent tool calls also fire
   // PostToolUse, so the tier file stays fresh even during a long fan-out turn
