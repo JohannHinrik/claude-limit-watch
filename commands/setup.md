@@ -1,5 +1,5 @@
 ---
-description: One-time setup for limit-watch — install the status line and CronCreate permission
+description: One-time setup for limit-watch — install the status line and Cron tool permissions
 ---
 
 The limit-watch plugin's hooks are already active (plugins register hooks

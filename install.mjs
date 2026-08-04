@@ -5,7 +5,7 @@
 //
 //   node install.mjs          # interactive, asks before each change
 //   node install.mjs --yes    # accept all defaults
-import { readFileSync, writeFileSync, copyFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, copyFileSync, renameSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { homedir } from 'node:os';
@@ -43,6 +43,17 @@ const scriptCmd = (name) => win ? `node "${join(hooksDir, name)}"` : `node ~/.cl
 // wired against some other checkout must not count as installed.
 const runsInstalledCopy = (cmd, name) =>
   typeof cmd === 'string' && (cmd.includes(`~/.claude/hooks/${name}`) || cmd.includes(join(hooksDir, name)));
+const isWired = (hooks, ev, name) =>
+  (hooks?.[ev] || []).some(m => (m.hooks || []).some(h => runsInstalledCopy(h.command, name)));
+
+// The bundled plugin manifest is the single source of truth for which events,
+// matchers and timeouts each hook script wants; manual wiring derives its
+// entries from it (swapping only the command path) so the two install modes
+// cannot drift when a matcher or event changes.
+const manifest = JSON.parse(readFileSync(join(here, 'hooks', 'hooks.json'), 'utf8')).hooks;
+const manifestEntries = (name) => Object.entries(manifest).flatMap(([event, ms]) =>
+  ms.filter(m => (m.hooks || []).some(h => h.command.includes(name)))
+    .map(m => ({ event, matcher: m.matcher || '', timeout: m.hooks[0].timeout ?? 10 })));
 
 console.log('claude-limit-watch installer\n');
 
@@ -96,10 +107,8 @@ let addPerms = [];
 let watchdogActive = false;
 let pluginFresh = false; // plugin installed by THIS run, so already current
 
-const WATCHDOG_EVENTS = ['PostToolUse', 'Stop'];
-const wiredEvents = (hooks, name) =>
-  WATCHDOG_EVENTS.filter(ev =>
-    (hooks?.[ev] || []).some(m => (m.hooks || []).some(h => runsInstalledCopy(h.command, name))));
+const WATCHDOG_EVENTS = manifestEntries('limit-watch.mjs').map(e => e.event);
+const wiredEvents = (hooks, name) => WATCHDOG_EVENTS.filter(ev => isWired(hooks, ev, name));
 
 // --- 1. Watchdog: plugin (recommended) or manual hook wiring ---
 const pluginEnabled = settings.enabledPlugins?.['limit-watch@limit-watch'] === true;
@@ -149,18 +158,52 @@ if (!watchdogActive && await confirm('Wire the watchdog hooks directly into ~/.c
   }
 }
 
+// Best-effort version of the already-installed plugin, so re-runs stay a
+// no-op when it is current. The plugin dir layout is not a stable contract,
+// hence the bounded scan; not finding it just means offering the update.
+const verGte = (a, b) => {
+  const [x, y] = [String(a).split('.'), String(b).split('.')];
+  for (let i = 0; i < 3; i++) {
+    const [xi, yi] = [parseInt(x[i], 10) || 0, parseInt(y[i], 10) || 0];
+    if (xi !== yi) return xi > yi;
+  }
+  return true;
+};
+function installedPluginVersion() {
+  let best = null;
+  const walk = (dir, depth) => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name === 'node_modules' || e.name === '.git') continue;
+      if (e.name === '.claude-plugin') {
+        try {
+          const p = JSON.parse(readFileSync(join(dir, e.name, 'plugin.json'), 'utf8'));
+          if (p.name === 'limit-watch' && typeof p.version === 'string' && (!best || verGte(p.version, best))) best = p.version;
+        } catch {}
+      } else if (depth < 5) {
+        walk(join(dir, e.name), depth + 1);
+      }
+    }
+  };
+  walk(join(claudeDir, 'plugins'), 0);
+  return best;
+}
+
 // --- 1b. Agent gate (limit-guard.mjs on PreToolUse) ---
 // Pauses new Agent/Task/Workflow launches when a freeze is imminent, so the
 // limit does not catch a fan-out of subagents mid-task. Ships in the plugin's
 // hooks.json (nothing to wire); manual installs need an explicit entry.
-if (pluginEnabled && !pluginFresh) {
-  // A plugin installed before the gate existed only picks it up on update.
-  if (await confirm('Update the plugin to the latest version (adds burn-rate prediction and the agent gate)?')) {
+if (pluginEnabled) {
+  const bundled = JSON.parse(readFileSync(join(here, '.claude-plugin', 'plugin.json'), 'utf8')).version;
+  const installed = installedPluginVersion();
+  if (installed && verGte(installed, bundled)) {
+    console.log(`Plugin already at version ${installed}; nothing to update.`);
+  } else if (await confirm(`Update the plugin to the bundled version (${bundled})?`)) {
     run('claude', ['plugin', 'install', 'limit-watch@limit-watch']);
   }
 } else if (watchdogActive && !pluginFresh) {
-  const guardWired = (settings.hooks?.PreToolUse || []).some(m =>
-    (m.hooks || []).some(h => runsInstalledCopy(h.command, 'limit-guard.mjs')));
+  const guardWired = manifestEntries('limit-guard.mjs').every(e => isWired(settings.hooks, e.event, 'limit-guard.mjs'));
   if (guardWired) {
     console.log('Agent gate hook already wired; checking the installed script.');
     await installScript('limit-guard.mjs');
@@ -214,24 +257,16 @@ if (wireManual || wireGuard || setStatusLine || addPerms.length) {
       if (isSettingsObject(parsed)) fresh = parsed;
     } catch {}
   }
-  if (wireManual) {
-    const entry = { matcher: '', hooks: [{ type: 'command', command: scriptCmd('limit-watch.mjs'), timeout: 10 }] };
+  const appendHooks = (name) => {
     fresh.hooks = fresh.hooks || {};
-    for (const ev of WATCHDOG_EVENTS) {
-      const arr = fresh.hooks[ev] || [];
-      if (!arr.some(m => (m.hooks || []).some(h => runsInstalledCopy(h.command, 'limit-watch.mjs')))) {
-        fresh.hooks[ev] = [...arr, entry];
+    for (const { event, matcher, timeout } of manifestEntries(name)) {
+      if (!isWired(fresh.hooks, event, name)) {
+        fresh.hooks[event] = [...(fresh.hooks[event] || []), { matcher, hooks: [{ type: 'command', command: scriptCmd(name), timeout }] }];
       }
     }
-  }
-  if (wireGuard) {
-    const entry = { matcher: '^(Agent|Task|Workflow)$', hooks: [{ type: 'command', command: scriptCmd('limit-guard.mjs'), timeout: 10 }] };
-    fresh.hooks = fresh.hooks || {};
-    const arr = fresh.hooks.PreToolUse || [];
-    if (!arr.some(m => (m.hooks || []).some(h => runsInstalledCopy(h.command, 'limit-guard.mjs')))) {
-      fresh.hooks.PreToolUse = [...arr, entry];
-    }
-  }
+  };
+  if (wireManual) appendHooks('limit-watch.mjs');
+  if (wireGuard) appendHooks('limit-guard.mjs');
   if (setStatusLine) {
     fresh.statusLine = { type: 'command', command: scriptCmd('limit-statusline.mjs'), refreshInterval: 60 };
   }

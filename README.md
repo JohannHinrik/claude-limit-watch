@@ -150,16 +150,19 @@ Constants at the top of `hooks/limit-watch.mjs`:
 | `WINDDOWN_LEAD_S` | 2400 | wind down when 100% is projected within 40 min |
 | `ARM_LEAD_S` | 1200 | arm when 100% is projected within 20 min |
 | `GATE_LEAD_S` | 600 | gate when 100% is projected within 10 min |
-| `LOOKBACK_S` | 600 | slope is fitted over this many seconds of samples |
+| `LOOKBACK_S` | 600 | slope is fitted over this many seconds of samples (keep below the status line's `HIST_KEEP_S`, 2700, or older samples won't exist) |
+| `TIER_TTL_S` | 600 | published tier expires this long after it was computed |
 | `MIN_RISE_PCT` | 2 | minimum rise across the lookback before the slope is trusted |
 | `FIRE_AFTER_S` | 120 | how long after the reset the cron fires |
 | `RENOTIFY_S` | 300 | repeat the arm nudge if a turn ignored it |
 
 Predictive triggers only fire when the projection also lands *before* the
 window reset — a burst that would coast past the reset boundary is left
-alone. `hooks/limit-guard.mjs` has `TIER_TTL_S` (600): how stale a published
-tier may be before the gate fails open. `LIMIT_WATCH_NO_GATE=1` in the
-environment disables the gate entirely.
+alone. Freshness is the writer's contract: the tier file carries an
+`expires` stamp (computed from `TIER_TTL_S`, capped at the window reset)
+that the gate and the status line simply compare against, so retuning it is
+a one-place change. `LIMIT_WATCH_NO_GATE=1` in the environment disables the
+gate entirely.
 
 The scripts are re-executed on every event, so edits apply to all sessions
 immediately, no reload needed.
