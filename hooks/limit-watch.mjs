@@ -48,6 +48,7 @@ const MIN_RISE_PCT = 2;
 // would: a conservative fallback, never the preferred source.
 const WINDOW_S = 18000;
 const PACE_MIN_ELAPSED_S = 600;
+const PACE_MIN_PCT = 2; // ignore a near-zero window average as noise
 // Nudges warn when the cache driving them is older than this — tiers still
 // fire (pct only rises within a window, so old data understates), but the
 // user should know the numbers are behind.
@@ -101,27 +102,35 @@ try {
 
 if (!reused) {
   // Burn rate: least-squares slope (percent/second) over recent samples.
+  // measuredFlat distinguishes "the fit had enough data and found no rise"
+  // from "there was not enough data to fit": only the latter may fall back to
+  // the window average. Without that split, a session that burned hard and
+  // then went quiet keeps a positive pace projection forever — the tier never
+  // drops back below arm, so the cancel path can never fire.
+  let measuredFlat = false;
   try {
     const hist = JSON.parse(readFileSync(join(claudeDir, 'limit-watch-history.json'), 'utf8'));
     if (hist.resets === resets && Array.isArray(hist.samples)) {
       const s = hist.samples.filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]) && now - p[0] <= LOOKBACK_S);
-      if (s.length >= MIN_SAMPLES
-          && s[s.length - 1][0] - s[0][0] >= MIN_SPAN_S
-          && s[s.length - 1][1] - s[0][1] >= MIN_RISE_PCT) {
+      const enough = s.length >= MIN_SAMPLES && s[s.length - 1][0] - s[0][0] >= MIN_SPAN_S;
+      if (enough && s[s.length - 1][1] - s[0][1] >= MIN_RISE_PCT) {
         const n = s.length;
         const mt = s.reduce((a, p) => a + p[0], 0) / n;
         const mp = s.reduce((a, p) => a + p[1], 0) / n;
         let num = 0, den = 0;
         for (const [t, p] of s) { num += (t - mt) * (p - mp); den += (t - mt) * (t - mt); }
         if (den > 0 && num > 0) slope = num / den;
+        else measuredFlat = true; // enough data, no upward trend in it
+      } else if (enough) {
+        measuredFlat = true; // enough data, rise below the noise floor
       }
     }
   } catch {}
   if (slope) {
     source = 'slope';
-  } else {
+  } else if (!measuredFlat) {
     const elapsed = WINDOW_S - (resets - now);
-    if (elapsed >= PACE_MIN_ELAPSED_S && elapsed <= WINDOW_S && pct >= MIN_RISE_PCT) {
+    if (elapsed >= PACE_MIN_ELAPSED_S && elapsed <= WINDOW_S && pct >= PACE_MIN_PCT) {
       slope = pct / elapsed;
       source = 'pace';
     }
@@ -140,7 +149,8 @@ if (!reused) {
   try {
     const tmp = `${tierPath}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify({
-      t: now, expires: Math.min(now + TIER_TTL_S, resets), tier, pct, resets, slope, secs_to_100: secsTo100, source, cache_age: cacheAge
+      t: now, expires: Math.min(now + TIER_TTL_S, resets), tier, pct, resets, slope, secs_to_100: secsTo100, source,
+      fire_after: FIRE_AFTER_S // the status line's armed countdown reads this instead of mirroring the constant
     }));
     renameSync(tmp, tierPath);
   } catch {}
@@ -209,7 +219,7 @@ if (event === 'Stop' && !input.stop_hook_active && (tier === 'none' || tier === 
     rmSync(`${armMark}.tmux`, { force: true });
     process.stdout.write(JSON.stringify({
       decision: 'block',
-      reason: `[limit-watch] The burn rate flattened: the 5-hour window is at ${pctR}% and no longer projected to hit 100% before it resets. If the task you scheduled the limit-watch resume cron for is fully complete, cancel that cron now with CronDelete (its job id is in your earlier CronCreate result; use CronList if you no longer have it), then stop. If work remains, or the cron is already gone, or Cron tools are unavailable, just stop.`
+      reason: `[limit-watch] The burn rate flattened: the 5-hour window is at ${pctR}% and no longer projected to hit 100% before it resets. If the task you scheduled the limit-watch resume cron for is fully complete, cancel that cron now with CronDelete (its job id is in your earlier CronCreate result; use CronList if you no longer have it), then stop. If work remains, or the cron is already gone, or Cron tools are unavailable, just stop.${staleNote}`
     }));
     process.exit(0);
   } catch {}
@@ -237,6 +247,7 @@ const fire = new Date((resets + FIRE_AFTER_S) * 1000);
 const cron = `${fire.getMinutes()} ${fire.getHours()} ${fire.getDate()} ${fire.getMonth() + 1} *`;
 const hh = String(fire.getHours()).padStart(2, '0');
 const mm = String(fire.getMinutes()).padStart(2, '0');
+const fireMins = Math.max(1, Math.round(FIRE_AFTER_S / 60));
 const cronPrompt = `Resumed by limit-watch: the usage window has reset. Read the handoff note at ${handoff} if it exists and resume from its next step; otherwise continue the interrupted task if any work remains. If everything was already complete, reply briefly and stop.`;
 
 // Stop at arm tier: block the stop once per window instead of injecting
@@ -255,7 +266,7 @@ if (event === 'Stop') {
       pruneOldMarks();
       process.stdout.write(JSON.stringify({
         decision: 'block',
-        reason: `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} — this session must not go idle without its auto-resume. If you have NOT already created the limit-watch resume cron for this reset window, create it now: call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` (fires at ${hh}:${mm}, 2 minutes after the reset), then write the handoff note at \`${handoff}\` — task in progress, what is done, the exact next step — and stop. If that cron already exists (use CronList if unsure), or Cron tools are unavailable, just stop.${staleNote}`
+        reason: `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} — this session must not go idle without its auto-resume. If you have NOT already created the limit-watch resume cron for this reset window, create it now: call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` (fires at ${hh}:${mm}, ${fireMins} minutes after the reset), then write the handoff note at \`${handoff}\` — task in progress, what is done, the exact next step — and stop. If that cron already exists (use CronList if unsure), or Cron tools are unavailable, just stop.${staleNote}`
       }));
       process.exit(0);
     } catch {}
@@ -274,7 +285,7 @@ try {
 recordTmuxPane();
 pruneOldMarks();
 
-const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` That fires at ${hh}:${mm}, 2 minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Right after the CronCreate, write (or refresh) the handoff note at \`${handoff}\`: the task in progress, what is already done, and the exact next step — and keep it current as work advances. Then keep working while budget remains, preferring to finish in-flight work over starting new subagent fan-outs.${staleNote}`;
+const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` That fires at ${hh}:${mm}, ${fireMins} minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Right after the CronCreate, write (or refresh) the handoff note at \`${handoff}\`: the task in progress, what is already done, and the exact next step — and keep it current as work advances. Then keep working while budget remains, preferring to finish in-flight work over starting new subagent fan-outs.${staleNote}`;
 
 process.stdout.write(JSON.stringify({
   suppressOutput: true,

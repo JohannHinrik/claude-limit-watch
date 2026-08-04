@@ -28,9 +28,12 @@ receives it. So the setup is four small Node scripts:
   `~/.claude/limit-watch-history.json`.
 - `hooks/limit-watch.mjs` runs on `PostToolUse` (every tool call, empty
   matcher) and on `Stop`. It fits a burn rate (least-squares slope over the
-  last 10 minutes of samples; when too few samples exist, it falls back to
-  the window-average pace — usage over time elapsed — which needs only the
-  current snapshot and deliberately understates a fresh burst), projects
+  last 10 minutes of samples; when there are too few samples to fit, it falls
+  back to the window-average pace — usage over time elapsed — which needs only
+  the current snapshot. A fit that *did* have enough data and measured a flat
+  burn is not overridden by that average: "no data" and "no burn" are
+  different answers, and conflating them would keep a quiet session armed
+  forever), projects
   when the window hits 100%, and computes a tier, published to
   `~/.claude/limit-watch-tier.json`. Nudges driven by a cache more than 10
   minutes old say so, so stale data diagnoses itself:
@@ -78,7 +81,7 @@ receives it. So the setup is four small Node scripts:
 
   | Pane state | Action |
   |---|---|
-  | Claude running, limit freeze visible (`capture-pane` matches) | dismiss the choice modal with `Escape` if present, then type the resume prompt |
+  | Claude running, limit freeze visible on the **current screen** (`capture-pane` matches Claude Code's own freeze wording) | dismiss the choice modal with `Escape` if present, then type the resume prompt |
   | back at a shell — the process exited and took its cron with it | type `claude --resume <session-id>` in the recorded cwd; the prompt follows on the next tick, once the process is up |
   | anything else, or no limit message | left alone |
 
@@ -86,8 +89,10 @@ receives it. So the setup is four small Node scripts:
   choice modal ("Stop and wait for limit to reset / Ask your admin for more
   usage"), and a cron cannot fire while the REPL is not idle — which is
   exactly why an external resumer exists, and why it sends `Escape` before
-  typing. Every outcome is recorded in a `.resumed` sidecar (once per pane
-  per window); the relaunch path only ever types a `claude --resume` command,
+  typing. Settled outcomes are recorded in a `.resumed` sidecar (once per pane
+  per window), but a missing banner or a failed tmux call only retries — a
+  single bad read cannot spend the whole fallback, and the pane is retried
+  until `GIVE_UP_AFTER_S`. The relaunch path only ever types a `claude --resume` command,
   never a bare prompt, so a shell that is not ours cannot be driven into
   running something arbitrary. Set `RELAUNCH_DEAD = false` to disable
   relaunching. If both paths fire, the duplicate costs one
@@ -187,7 +192,8 @@ Keep that block when merging, or add the entries to your existing allow list.
   named `<session-id>-<reset-epoch>` (with `.winddown` / `.stopblock` /
   `.cancel` variants for the other one-shot nudges, `.md` for the handoff
   note, and `.tmux` / `.resumed` for the fallback resumer's pane record and
-  once-guard), and the status line shows `⏰ resume armed`. A mark with no
+  once-guard), and the status line shows `⏰ resume in Xm` (or `⏰ resume due`
+  once that moment has passed). A mark with no
   scheduled cron means the CronCreate call was denied — check the allowlist
   above.
 
@@ -206,6 +212,7 @@ Constants at the top of `hooks/limit-watch.mjs`:
 | `LOOKBACK_S` | 600 | slope is fitted over this many seconds of samples (keep below the status line's `HIST_KEEP_S`, 2700, or older samples won't exist) |
 | `TIER_TTL_S` | 600 | published tier expires this long after it was computed |
 | `MIN_RISE_PCT` | 2 | minimum rise across the lookback before the slope is trusted |
+| `PACE_MIN_PCT` | 2 | minimum usage before the window-average pace is trusted |
 | `PACE_MIN_ELAPSED_S` | 600 | window-average pace fallback needs at least this much of the window elapsed |
 | `STALE_WARN_S` | 600 | nudges note the cache age when it exceeds this |
 | `FIRE_AFTER_S` | 120 | how long after the reset the cron fires |
@@ -218,7 +225,8 @@ And in `hooks/limit-resume.mjs`:
 | `RESUME_AFTER_S` | 300 | how long after the reset the tmux fallback types the resume (keep above `FIRE_AFTER_S` so the in-session cron goes first) |
 | `LIMIT_RE` | (pattern) | the on-screen limit message that must be visible before the resume is typed; update here if Claude Code's wording changes |
 | `MODAL_RE` | (pattern) | the blocking choice modal, dismissed with `Escape` before typing |
-| `CAPTURE_LINES` | 2000 | scrollback depth searched for that message |
+| `CAPTURE_VISIBLE_ONLY` | true | search only the visible screen, never scrollback — an old banner in history would match forever |
+| `GIVE_UP_AFTER_S` | 3600 | keep retrying a pane this long before recording a permanent outcome, so one bad read cannot spend the fallback |
 | `RELAUNCH_DEAD` | true | relaunch `claude --resume` when the pane fell back to a shell |
 
 Predictive triggers only fire when the projection also lands *before* the

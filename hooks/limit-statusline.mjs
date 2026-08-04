@@ -55,10 +55,23 @@ try {
   }
 } catch {}
 
+// Window lengths behind the pace arrow. WINDOW_S mirrors the same constant in
+// limit-watch.mjs (the hooks install as standalone files, so there is no
+// shared module to import); keep the two in step if it ever changes.
+const WINDOW_S = 18000;
+const WEEK_S = 604800;
+const FIRE_AFTER_FALLBACK_S = 120;
+
 // Relative time reads faster under pressure than an absolute clock time.
+// Every branch truncates the same way (floor plus a remainder), so a
+// countdown never overstates what is left; the caller handles <= 0.
 const rel = (secs) => {
-  const m = Math.max(0, Math.ceil(secs / 60));
-  if (m >= 2880) return `${Math.round(m / 1440)}d`;
+  const m = Math.max(0, Math.floor(secs / 60));
+  if (m >= 1440) {
+    const d = Math.floor(m / 1440);
+    const h = Math.floor((m % 1440) / 60);
+    return h ? `${d}d${h}h` : `${d}d`;
+  }
   if (m >= 60) return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
   return `${m}m`;
 };
@@ -86,16 +99,17 @@ const model = input.model?.display_name || input.model?.id;
 if (model) parts.push(model);
 const dir = (input.workspace?.current_dir || input.cwd || '').split('/').filter(Boolean).pop();
 if (dir) parts.push(dir);
-const fh = fmt(rl?.five_hour, 18000);
+const fh = fmt(rl?.five_hour, WINDOW_S);
 if (fh) parts.push(`5h ${fh}`);
-const sd = fmt(rl?.seven_day, 604800);
+const sd = fmt(rl?.seven_day, WEEK_S);
 if (sd) parts.push(`7d ${sd}`);
 
 // limit-watch publishes the account-wide tier it computed, stamped with its
 // own expiry; surface the two levels that change behavior so the user can
 // see why.
+let tier = null;
 try {
-  const tier = JSON.parse(readFileSync(join(claudeRoot, 'limit-watch-tier.json'), 'utf8'));
+  tier = JSON.parse(readFileSync(join(claudeRoot, 'limit-watch-tier.json'), 'utf8'));
   if (Number.isFinite(tier.expires) && tier.expires > now) {
     if (tier.tier === 'imminent') parts.push('⛔ agents gated');
     else if (tier.tier === 'winddown') parts.push('⏳ wind-down');
@@ -108,8 +122,14 @@ try {
   const r = toSec(rl?.five_hour?.resets_at);
   if (input.session_id && r !== null) {
     statSync(join(claudeRoot, 'limit-watch-marks', `${input.session_id}-${r}`));
-    // + 120 mirrors limit-watch.mjs FIRE_AFTER_S (the cron's delay past reset)
-    parts.push(`⏰ resume in ${rel(r + 120 - now)}`);
+    // The cron's delay past the reset comes from the tier file limit-watch
+    // publishes, so retuning FIRE_AFTER_S cannot make this countdown lie.
+    const fireAfter = Number.isFinite(tier?.fire_after) ? tier.fire_after : FIRE_AFTER_FALLBACK_S;
+    const left = r + fireAfter - now;
+    // Past the fire time the countdown would sit at "0m" forever (a stale
+    // cached resets_at keeps the branch alive), which reads as an imminent
+    // resume that already happened; say it is due instead.
+    parts.push(left > 0 ? `⏰ resume in ${rel(left)}` : '⏰ resume due');
   }
 } catch {}
 
