@@ -1,11 +1,16 @@
 {
   "name": "limit-watch",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Auto-resume Claude Code sessions that hit the 5-hour usage limit, with burn-rate prediction, graceful wind-down and an agent gate",
   "author": {
     "name": "JohannHinrik",
     "url": "https://github.com/JohannHinrik"
   },
   "homepage": "https://github.com/JohannHinrik/claude-limit-watch",
-  "keywords": ["rate-limit", "auto-resume", "hooks", "statusline"]
+  "keywords": [
+    "rate-limit",
+    "auto-resume",
+    "hooks",
+    "statusline"
+  ]
 }
