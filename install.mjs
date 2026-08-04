@@ -5,7 +5,7 @@
 //
 //   node install.mjs          # interactive, asks before each change
 //   node install.mjs --yes    # accept all defaults
-import { readFileSync, writeFileSync, copyFileSync, renameSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, copyFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { homedir } from 'node:os';
@@ -14,6 +14,9 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const claudeDir = join(homedir(), '.claude');
+const PLUGIN_ID = 'limit-watch@limit-watch';
+const MARKETPLACE = 'limit-watch';
+const MARKETPLACE_REPO = 'JohannHinrik/claude-limit-watch';
 const hooksDir = join(claudeDir, 'hooks');
 const settingsPath = join(claudeDir, 'settings.json');
 const yes = process.argv.includes('--yes') || process.argv.includes('-y');
@@ -111,7 +114,7 @@ const WATCHDOG_EVENTS = manifestEntries('limit-watch.mjs').map(e => e.event);
 const wiredEvents = (hooks, name) => WATCHDOG_EVENTS.filter(ev => isWired(hooks, ev, name));
 
 // --- 1. Watchdog: plugin (recommended) or manual hook wiring ---
-const pluginEnabled = settings.enabledPlugins?.['limit-watch@limit-watch'] === true;
+const pluginEnabled = settings.enabledPlugins?.[PLUGIN_ID] === true;
 const wired = wiredEvents(settings.hooks, 'limit-watch.mjs');
 if (pluginEnabled) {
   console.log('Watchdog plugin already installed and enabled.');
@@ -138,9 +141,9 @@ if (pluginEnabled) {
 } else if (has('claude')) {
   if (await confirm('Install the watchdog as a Claude Code plugin (recommended)?')) {
     console.log('\nRegistering marketplace (already-added is fine):');
-    run('claude', ['plugin', 'marketplace', 'add', 'JohannHinrik/claude-limit-watch']);
+    run('claude', ['plugin', 'marketplace', 'add', MARKETPLACE_REPO]);
     console.log('\nInstalling plugin:');
-    if (run('claude', ['plugin', 'install', 'limit-watch@limit-watch'])) {
+    if (run('claude', ['plugin', 'install', PLUGIN_ID])) {
       watchdogActive = true;
       pluginFresh = true;
     } else {
@@ -160,11 +163,14 @@ if (!watchdogActive && await confirm('Wire the watchdog hooks directly into ~/.c
 
 // Best-effort version of the already-installed plugin, so re-runs stay a
 // no-op when it is current. installed_plugins.json is the registry sessions
-// actually load from, so it is checked first; the cache scan is a fallback.
-// Neither the marketplace clone (updates ahead of the install) nor a merely
-// materialized cache dir prove anything by themselves — only the registry
-// pointer does. None of these paths are a stable contract, hence best-effort;
-// not finding a version just means offering the update.
+// actually load from, and it is the only source consulted: a version counts
+// only when a user-scope entry (the scope `plugin update` acts on) carries a
+// numeric version AND its installPath still exists on disk. A registry
+// pointer to deleted code, the sentinel version "unknown", another scope's
+// install, or a materialized-but-unregistered cache dir all count as "not
+// installed" — offering a redundant (re)install is cheap, wrongly printing
+// "nothing to update" strands the user. Not a stable contract, hence
+// best-effort; not finding a version just means offering the update.
 const verGte = (a, b) => {
   const [x, y] = [String(a).split('.'), String(b).split('.')];
   for (let i = 0; i < 3; i++) {
@@ -177,28 +183,14 @@ function installedPluginVersion() {
   let best = null;
   try {
     const reg = JSON.parse(readFileSync(join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf8'));
-    const entries = reg.plugins?.['limit-watch@limit-watch'] ?? reg['limit-watch@limit-watch'];
+    const entries = reg.plugins?.[PLUGIN_ID];
     for (const e of Array.isArray(entries) ? entries : []) {
-      if (typeof e?.version === 'string' && (!best || verGte(e.version, best))) best = e.version;
+      if (e?.scope !== 'user') continue;
+      if (typeof e?.version !== 'string' || !/^\d/.test(e.version)) continue;
+      if (typeof e?.installPath !== 'string' || !existsSync(e.installPath)) continue;
+      if (!best || verGte(e.version, best)) best = e.version;
     }
-    if (best) return best;
   } catch {}
-  const walk = (dir, depth) => {
-    let entries;
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (!e.isDirectory() || e.name === 'node_modules' || e.name === '.git') continue;
-      if (e.name === '.claude-plugin') {
-        try {
-          const p = JSON.parse(readFileSync(join(dir, e.name, 'plugin.json'), 'utf8'));
-          if (p.name === 'limit-watch' && typeof p.version === 'string' && (!best || verGte(p.version, best))) best = p.version;
-        } catch {}
-      } else if (depth < 5) {
-        walk(join(dir, e.name), depth + 1);
-      }
-    }
-  };
-  walk(join(claudeDir, 'plugins', 'cache'), 0);
   return best;
 }
 
@@ -211,12 +203,31 @@ if (pluginEnabled) {
   const installed = installedPluginVersion();
   if (installed && verGte(installed, bundled)) {
     console.log(`Plugin already at version ${installed}; nothing to update.`);
-  } else if (await confirm(`Update the plugin to the bundled version (${bundled})?`)) {
-    // `plugin install` on an already-installed plugin never moves the version
-    // pointer in installed_plugins.json; only `plugin update` does.
-    run('claude', ['plugin', 'marketplace', 'update', 'limit-watch']);
-    if (run('claude', ['plugin', 'update', 'limit-watch@limit-watch'])) {
-      console.log('Updated. Restart running sessions to load the new version.');
+  } else if (!has('claude')) {
+    console.log(`The plugin needs an update to ${bundled}, but the claude CLI is not on`);
+    console.log('PATH in this shell — run the update from inside Claude Code with /plugin.');
+  } else if (installed) {
+    if (await confirm(`Update the plugin to the bundled version (${bundled})?`)) {
+      // `plugin install` on an already-installed plugin never moves the
+      // version pointer in installed_plugins.json; only `plugin update` does,
+      // and it updates from the local marketplace clone — which must be
+      // refreshed first or the "update" reinstalls the stale version.
+      if (!run('claude', ['plugin', 'marketplace', 'update', MARKETPLACE])) {
+        console.log('Marketplace refresh failed (offline?); skipped the plugin update — re-run later.');
+      } else if (run('claude', ['plugin', 'update', PLUGIN_ID])) {
+        console.log('Updated. Restart running sessions to load the new version.');
+      } else {
+        console.log('Plugin update failed; see the output above.');
+      }
+    }
+  } else if (await confirm(`The plugin is enabled in settings but no working installed copy was found. (Re)install version ${bundled}?`)) {
+    // Enabled-but-missing (synced settings, cleared cache, broken registry
+    // entry): `plugin update` would error out here, so go through install.
+    run('claude', ['plugin', 'marketplace', 'add', MARKETPLACE_REPO]);
+    if (run('claude', ['plugin', 'install', PLUGIN_ID])) {
+      console.log('Installed. Restart running sessions to load it.');
+    } else {
+      console.log('Plugin install failed; see the output above.');
     }
   }
 } else if (watchdogActive && !pluginFresh) {
