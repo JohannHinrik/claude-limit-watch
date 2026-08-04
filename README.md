@@ -114,7 +114,9 @@ receives it. So the setup is four small Node scripts:
   until `GIVE_UP_AFTER_S`. The relaunch path only ever types a `claude --resume` command,
   never a bare prompt, so a shell that is not ours cannot be driven into
   running something arbitrary. Set `RELAUNCH_DEAD = false` to disable
-  relaunching. If both paths fire, the duplicate costs one
+  relaunching. On macOS the installer registers the launchd agent for you; on
+  Linux it installs the script and prints the crontab line
+  (`* * * * * node ~/.claude/hooks/limit-resume.mjs`) to add yourself. If both paths fire, the duplicate costs one
   short reply. When the burn flattens and the cron gets cancelled, the
   sidecar is deleted too — deterministically, since unlike the cron it needs
   no model cooperation. Installed by `install.mjs` (launchd agent

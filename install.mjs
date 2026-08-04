@@ -106,6 +106,7 @@ async function installScript(name) {
 // the very end, so a long prompt pause can't clobber concurrent changes.
 let wireManual = false;
 let wireGuard = false;
+let rewireGuard = false; // drop stale limit-guard entries, then wire fresh
 let setStatusLine = false;
 let addPerms = [];
 let watchdogActive = false;
@@ -233,7 +234,18 @@ if (pluginEnabled) {
   }
 } else if (watchdogActive && !pluginFresh) {
   const guardWired = manifestEntries('limit-guard.mjs').every(e => isWired(settings.hooks, e.event, 'limit-guard.mjs'));
-  if (guardWired) {
+  // isWired ignores the matcher, so a guard wired by an older version keeps
+  // its narrower matcher forever — and the hard brake, which must see every
+  // tool, would silently never fire. Detect the drift and offer to rewire.
+  const staleMatcher = guardWired && manifestEntries('limit-guard.mjs').some(({ event, matcher }) =>
+    !(settings.hooks?.[event] || []).some(m =>
+      (m.matcher || '') === matcher && (m.hooks || []).some(h => runsInstalledCopy(h.command, 'limit-guard.mjs'))));
+  if (guardWired && staleMatcher) {
+    console.log('\nThe agent gate is wired with an out-of-date matcher, so newer tiers');
+    console.log('(the opt-in hard brake, which must see every tool call) cannot fire.');
+    await installScript('limit-guard.mjs');
+    if (await confirm('Rewire it to the current matcher?')) rewireGuard = true;
+  } else if (guardWired) {
     console.log('Agent gate hook already wired; checking the installed script.');
     await installScript('limit-guard.mjs');
   } else if (await confirm('Wire the agent gate hook (pauses new subagent launches when a freeze is imminent)?')) {
@@ -326,10 +338,24 @@ if (watchdogActive && process.platform === 'darwin') {
       }
     }
   }
+} else if (watchdogActive && has('tmux')) {
+  // No launchd off macOS, so the agent cannot be registered here — but the
+  // resumer script itself is portable. Install it and hand over the cron line
+  // rather than skipping in silence.
+  console.log('\nThe tmux fallback resumer recovers sessions that froze before their');
+  console.log('cron existed (or whose process died). Registering it automatically needs');
+  console.log('launchd (macOS only), but the script is portable.');
+  if (await confirm('Install the script and print the cron line for it?')) {
+    await installScript('limit-resume.mjs');
+    if (existsSync(join(hooksDir, 'limit-resume.mjs'))) {
+      console.log('\nAdd this to your crontab (crontab -e) to run it every minute:');
+      console.log(`  * * * * * ${process.execPath} ${join(hooksDir, 'limit-resume.mjs')}`);
+    }
+  }
 }
 
 // --- 4. Apply decisions to a fresh read of settings.json ---
-if (wireManual || wireGuard || setStatusLine || addPerms.length) {
+if (wireManual || wireGuard || rewireGuard || setStatusLine || addPerms.length) {
   let fresh = settings;
   if (existsSync(settingsPath)) {
     try {
@@ -345,8 +371,19 @@ if (wireManual || wireGuard || setStatusLine || addPerms.length) {
       }
     }
   };
+  // Drop every entry running our copy of a script (any matcher), so the
+  // subsequent appendHooks re-adds it with the manifest's current matcher.
+  const dropHooks = (name) => {
+    for (const ev of Object.keys(fresh.hooks || {})) {
+      fresh.hooks[ev] = (fresh.hooks[ev] || [])
+        .map(m => ({ ...m, hooks: (m.hooks || []).filter(h => !runsInstalledCopy(h.command, name)) }))
+        .filter(m => (m.hooks || []).length > 0);
+      if (!fresh.hooks[ev].length) delete fresh.hooks[ev];
+    }
+  };
+  if (rewireGuard) dropHooks('limit-guard.mjs');
   if (wireManual) appendHooks('limit-watch.mjs');
-  if (wireGuard) appendHooks('limit-guard.mjs');
+  if (wireGuard || rewireGuard) appendHooks('limit-guard.mjs');
   if (setStatusLine) {
     fresh.statusLine = { type: 'command', command: scriptCmd('limit-statusline.mjs'), refreshInterval: 60 };
   }
