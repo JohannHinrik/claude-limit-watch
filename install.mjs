@@ -159,8 +159,12 @@ if (!watchdogActive && await confirm('Wire the watchdog hooks directly into ~/.c
 }
 
 // Best-effort version of the already-installed plugin, so re-runs stay a
-// no-op when it is current. The plugin dir layout is not a stable contract,
-// hence the bounded scan; not finding it just means offering the update.
+// no-op when it is current. Only plugins/cache counts: sessions execute from
+// the versioned cache, and the marketplace clone under plugins/marketplaces
+// updates ahead of it — scanning that would report an update as already
+// installed while every session still runs the old cached version. The dir
+// layout is not a stable contract, hence the bounded scan; not finding it
+// just means offering the update.
 const verGte = (a, b) => {
   const [x, y] = [String(a).split('.'), String(b).split('.')];
   for (let i = 0; i < 3; i++) {
@@ -186,7 +190,7 @@ function installedPluginVersion() {
       }
     }
   };
-  walk(join(claudeDir, 'plugins'), 0);
+  walk(join(claudeDir, 'plugins', 'cache'), 0);
   return best;
 }
 
