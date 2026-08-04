@@ -4,8 +4,9 @@
 // publishes it to ~/.claude/limit-watch-tier.json (read by limit-guard.mjs
 // and the status line):
 //
-//   winddown  finish in-flight work, avoid new fan-outs   (advisory nudge)
-//   arm       schedule the auto-resume cron via CronCreate (existing nudge)
+//   winddown  finish in-flight work, avoid new fan-outs, start a handoff note
+//   arm       schedule the auto-resume cron via CronCreate; the cron prompt
+//             points back at the handoff note so the resume lands with intent
 //   imminent  limit-guard.mjs pauses new agent launches
 //
 // Each tier trips on a static percentage OR on a burn-rate projection: when
@@ -129,6 +130,9 @@ if (input.agent_id || input.agent_type) process.exit(0);
 // arm mark by this exact name to show its "resume armed" flag.
 const markDir = join(claudeDir, 'limit-watch-marks');
 const armMark = join(markDir, `${input.session_id || 'unknown'}-${resets}`);
+// Handoff note the model is asked to write; the resume cron's prompt points
+// back at it. The .md suffix still matches pruneOldMarks' window regex.
+const handoff = `${armMark}.md`;
 const pruneOldMarks = () => {
   try {
     for (const f of readdirSync(markDir)) {
@@ -171,7 +175,7 @@ if (tier === 'winddown') {
   if (event !== 'PostToolUse') process.exit(0);
   try { writeFileSync(`${armMark}.winddown`, '', { flag: 'wx' }); } catch { process.exit(0); }
   pruneOldMarks();
-  const msg = `[limit-watch] Heads-up: the 5-hour usage window is at ${pctR}%${projNote}. Wind down gracefully: finish in-flight units before starting new ones, avoid launching new large subagent fan-outs, and keep progress checkpointed (todos/notes) so an interruption at 100% can resume cleanly. Advisory only — a resume nudge follows automatically if usage keeps climbing.`;
+  const msg = `[limit-watch] Heads-up: the 5-hour usage window is at ${pctR}%${projNote}. Wind down gracefully: finish in-flight units before starting new ones, avoid launching new large subagent fan-outs, and checkpoint progress into a handoff note at \`${handoff}\` — the task in progress, what is done, the exact next step — so an interruption at 100% can resume cleanly. Advisory only — a resume nudge follows automatically if usage keeps climbing.`;
   process.stdout.write(JSON.stringify({
     suppressOutput: true,
     hookSpecificOutput: { hookEventName: event, additionalContext: msg }
@@ -194,7 +198,7 @@ const cron = `${fire.getMinutes()} ${fire.getHours()} ${fire.getDate()} ${fire.g
 const hh = String(fire.getHours()).padStart(2, '0');
 const mm = String(fire.getMinutes()).padStart(2, '0');
 
-const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`Resumed by limit-watch: the usage window has reset. Continue the interrupted task if any work remains; if it was already complete, reply briefly and stop.\` That fires at ${hh}:${mm}, 2 minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Then keep working while budget remains — prefer finishing in-flight work over starting new subagent fan-outs, and checkpoint progress so a resume can pick up cleanly.`;
+const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`Resumed by limit-watch: the usage window has reset. Read the handoff note at ${handoff} if it exists and resume from its next step; otherwise continue the interrupted task if any work remains. If everything was already complete, reply briefly and stop.\` That fires at ${hh}:${mm}, 2 minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Right after the CronCreate, write (or refresh) the handoff note at \`${handoff}\`: the task in progress, what is already done, and the exact next step — and keep it current as work advances. Then keep working while budget remains, preferring to finish in-flight work over starting new subagent fan-outs.`;
 
 process.stdout.write(JSON.stringify({
   suppressOutput: true,

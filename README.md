@@ -29,8 +29,8 @@ receives it. So the setup is three small Node scripts:
 
   | Tier | Trigger (whichever comes first) | Action |
   |---|---|---|
-  | `winddown` | projected 100% in < 40 min (before the reset), or ≥ 70% used | one advisory: finish in-flight units, avoid new fan-outs, checkpoint progress |
-  | `arm` | projected 100% in < 20 min, or ≥ 85% used | inject the resume nudge: call CronCreate, schedule = reset + 2 min |
+  | `winddown` | projected 100% in < 40 min (before the reset), or ≥ 70% used | one advisory: finish in-flight units, avoid new fan-outs, start a handoff note |
+  | `arm` | projected 100% in < 20 min, or ≥ 85% used | inject the resume nudge: call CronCreate (schedule = reset + 2 min), then write/refresh the handoff note |
   | `imminent` | projected 100% in < 10 min, or ≥ 93% used | `limit-guard.mjs` pauses new agent launches |
 
   On `Stop`, if this session armed a resume earlier in the window but the
@@ -41,6 +41,12 @@ receives it. So the setup is three small Node scripts:
   costs a frozen, orphaned session. As extra insurance, the cron's prompt
   itself says "if the task was already complete, reply briefly and stop", so
   any stray that slips through costs one sentence in the fresh window.
+
+  The resume is not a bare `continue`: both nudges ask the model to keep a
+  **handoff note** (`~/.claude/limit-watch-marks/<session-id>-<reset>.md` —
+  task in progress, what is done, the exact next step), and the cron's prompt
+  points back at it. A session that froze mid-task and was compacted
+  overnight resumes with intent instead of re-deriving where it was.
 - `hooks/limit-guard.mjs` runs on `PreToolUse` for `Agent`/`Task`/`Workflow`.
   At the `imminent` tier it denies **new** agent and workflow launches with a
   reason telling the model to work inline or wait for the reset; agents
@@ -134,9 +140,9 @@ Keep that block when merging, or add the entries to your existing allow list.
   call; it records the current tier, percentage, slope and projection.
 - Once a session arms, a mark file appears in `~/.claude/limit-watch-marks/`
   named `<session-id>-<reset-epoch>` (with `.winddown` / `.cancel` variants
-  for the other one-shot nudges), and the status line shows `⏰ resume
-  armed`. A mark with no scheduled cron means the CronCreate call was
-  denied — check the allowlist above.
+  for the other one-shot nudges, and `.md` for the handoff note), and the
+  status line shows `⏰ resume armed`. A mark with no scheduled cron means
+  the CronCreate call was denied — check the allowlist above.
 
 ## Tuning
 
