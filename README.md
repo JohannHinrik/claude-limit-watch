@@ -1,7 +1,9 @@
 # claude-limit-watch
 
 Auto-resume for Claude Code sessions that hit the 5-hour usage limit —
-now with burn-rate prediction, graceful wind-down, and an agent gate.
+with burn-rate prediction, graceful wind-down with handoff notes, a
+stop-blocking guarantee, an agent gate, and an external tmux fallback for
+sessions that freeze before they could arm.
 
 The watchdog tracks how fast the 5-hour window is being consumed, not just
 where it stands. A huge task burning 5%/min gets its auto-resume armed at 60%
@@ -98,8 +100,10 @@ all defaults non-interactively)
 The installer runs in your shell, outside Claude Code's permission system, so
 it can do everything in one guided pass: register the plugin via the `claude`
 CLI (or fall back to wiring the hooks into settings directly if the CLI is
-missing), install the status line and add the Cron tools to your permission
-allowlist. An existing custom status line is kept unless you opt in; an
+missing), update an already-installed plugin to the bundled version, install
+the status line, add the Cron tools to your permission allowlist, and — on
+macOS with tmux present — register the tmux fallback resumer's launchd
+agent. An existing custom status line is kept unless you opt in; an
 edited or outdated hook script is updated with the old copy saved next to it
 as `<name>.bak`, so upgrades work non-interactively without losing your
 tuning. Your previous settings are backed up to `~/.claude/settings.json.bak`,
@@ -160,10 +164,11 @@ Keep that block when merging, or add the entries to your existing allow list.
   call; it records the current tier, percentage, slope and projection.
 - Once a session arms, a mark file appears in `~/.claude/limit-watch-marks/`
   named `<session-id>-<reset-epoch>` (with `.winddown` / `.stopblock` /
-  `.cancel` variants for the other one-shot nudges, and `.md` for the
-  handoff note), and the
-  status line shows `⏰ resume armed`. A mark with no scheduled cron means
-  the CronCreate call was denied — check the allowlist above.
+  `.cancel` variants for the other one-shot nudges, `.md` for the handoff
+  note, and `.tmux` / `.resumed` for the fallback resumer's pane record and
+  once-guard), and the status line shows `⏰ resume armed`. A mark with no
+  scheduled cron means the CronCreate call was denied — check the allowlist
+  above.
 
 ## Tuning
 
@@ -182,6 +187,12 @@ Constants at the top of `hooks/limit-watch.mjs`:
 | `MIN_RISE_PCT` | 2 | minimum rise across the lookback before the slope is trusted |
 | `FIRE_AFTER_S` | 120 | how long after the reset the cron fires |
 | `RENOTIFY_S` | 300 | repeat the arm nudge if a turn ignored it |
+
+And one in `hooks/limit-resume.mjs`:
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `RESUME_AFTER_S` | 300 | how long after the reset the tmux fallback types the resume (keep above `FIRE_AFTER_S` so the in-session cron goes first) |
 
 Predictive triggers only fire when the projection also lands *before* the
 window reset — a burst that would coast past the reset boundary is left
@@ -215,5 +226,10 @@ immediately, no reload needed.
 - The agent gate blocks new `Agent`/`Task`/`Workflow` tool calls only. Agents
   already in flight, and agents spawned internally by an already-running
   workflow, are not interrupted.
+- Everything keys off the **5-hour** window. The 7-day cap is shown in the
+  status line but has no auto-resume: its reset is typically days away —
+  longer than a session process (or an awake laptop) reliably survives — and
+  a resume scheduled for the 5-hour reset would just hit the weekly wall
+  again.
 
 Tested on Claude Code 2.1.220.
