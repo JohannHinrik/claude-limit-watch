@@ -6,7 +6,10 @@
 //
 //   winddown  finish in-flight work, avoid new fan-outs, start a handoff note
 //   arm       schedule the auto-resume cron via CronCreate; the cron prompt
-//             points back at the handoff note so the resume lands with intent
+//             points back at the handoff note so the resume lands with intent.
+//             A Stop at this tier is blocked once per window, so a session
+//             cannot go idle without its resume cron even if every
+//             PostToolUse nudge was ignored
 //   imminent  limit-guard.mjs pauses new agent launches
 //
 // Each tier trips on a static percentage OR on a burn-rate projection: when
@@ -183,7 +186,37 @@ if (tier === 'winddown') {
   process.exit(0);
 }
 
-// Arm tier (also covers imminent): nudge the model to schedule the resume.
+// Arm tier (also covers imminent) from here down.
+const fire = new Date((resets + FIRE_AFTER_S) * 1000);
+const cron = `${fire.getMinutes()} ${fire.getHours()} ${fire.getDate()} ${fire.getMonth() + 1} *`;
+const hh = String(fire.getHours()).padStart(2, '0');
+const mm = String(fire.getMinutes()).padStart(2, '0');
+const cronPrompt = `Resumed by limit-watch: the usage window has reset. Read the handoff note at ${handoff} if it exists and resume from its next step; otherwise continue the interrupted task if any work remains. If everything was already complete, reply briefly and stop.`;
+
+// Stop at arm tier: block the stop once per window instead of injecting
+// context (Stop-context injection is unreliable, and an idle session is
+// exactly the one that freezes unresumed). The forced turn's only job is to
+// make sure the cron exists — the PostToolUse nudge is advisory, this is the
+// guarantee. stop_hook_active guards the follow-up stop and the .stopblock
+// mark keeps it to once per window; the bare arm mark is also ensured so the
+// status line flag and the cancel path work for sessions armed only here.
+if (event === 'Stop') {
+  if (!input.stop_hook_active) {
+    try {
+      writeFileSync(`${armMark}.stopblock`, '', { flag: 'wx' });
+      try { writeFileSync(armMark, '', { flag: 'wx' }); } catch {}
+      pruneOldMarks();
+      process.stdout.write(JSON.stringify({
+        decision: 'block',
+        reason: `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} — this session must not go idle without its auto-resume. If you have NOT already created the limit-watch resume cron for this reset window, create it now: call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` (fires at ${hh}:${mm}, 2 minutes after the reset), then write the handoff note at \`${handoff}\` — task in progress, what is done, the exact next step — and stop. If that cron already exists (use CronList if unsure), or Cron tools are unavailable, just stop.`
+      }));
+      process.exit(0);
+    } catch {}
+  }
+  process.exit(0);
+}
+
+// PostToolUse arm nudge, repeated at most once per RENOTIFY_S.
 try {
   const st = statSync(armMark);
   if (now - Math.floor(st.mtimeMs / 1000) < RENOTIFY_S) process.exit(0);
@@ -193,12 +226,7 @@ try {
 }
 pruneOldMarks();
 
-const fire = new Date((resets + FIRE_AFTER_S) * 1000);
-const cron = `${fire.getMinutes()} ${fire.getHours()} ${fire.getDate()} ${fire.getMonth() + 1} *`;
-const hh = String(fire.getHours()).padStart(2, '0');
-const mm = String(fire.getMinutes()).padStart(2, '0');
-
-const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`Resumed by limit-watch: the usage window has reset. Read the handoff note at ${handoff} if it exists and resume from its next step; otherwise continue the interrupted task if any work remains. If everything was already complete, reply briefly and stop.\` That fires at ${hh}:${mm}, 2 minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Right after the CronCreate, write (or refresh) the handoff note at \`${handoff}\`: the task in progress, what is already done, and the exact next step — and keep it current as work advances. Then keep working while budget remains, preferring to finish in-flight work over starting new subagent fan-outs.`;
+const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` That fires at ${hh}:${mm}, 2 minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Right after the CronCreate, write (or refresh) the handoff note at \`${handoff}\`: the task in progress, what is already done, and the exact next step — and keep it current as work advances. Then keep working while budget remains, preferring to finish in-flight work over starting new subagent fan-outs.`;
 
 process.stdout.write(JSON.stringify({
   suppressOutput: true,

@@ -30,7 +30,7 @@ receives it. So the setup is three small Node scripts:
   | Tier | Trigger (whichever comes first) | Action |
   |---|---|---|
   | `winddown` | projected 100% in < 40 min (before the reset), or ≥ 70% used | one advisory: finish in-flight units, avoid new fan-outs, start a handoff note |
-  | `arm` | projected 100% in < 20 min, or ≥ 85% used | inject the resume nudge: call CronCreate (schedule = reset + 2 min), then write/refresh the handoff note |
+  | `arm` | projected 100% in < 20 min, or ≥ 85% used | inject the resume nudge: call CronCreate (schedule = reset + 2 min), then write/refresh the handoff note; a Stop at this tier is blocked once per window until the cron exists |
   | `imminent` | projected 100% in < 10 min, or ≥ 93% used | `limit-guard.mjs` pauses new agent launches |
 
   On `Stop`, if this session armed a resume earlier in the window but the
@@ -41,6 +41,12 @@ receives it. So the setup is three small Node scripts:
   costs a frozen, orphaned session. As extra insurance, the cron's prompt
   itself says "if the task was already complete, reply briefly and stop", so
   any stray that slips through costs one sentence in the fresh window.
+
+  The PostToolUse nudge is advisory; the guarantee is on `Stop`: a session
+  trying to go idle at the arm tier gets its stop **blocked** (once per
+  window, `stop_hook_active`-guarded against loops), forcing one turn whose
+  only job is to make sure the resume cron exists. Ignored mid-flight nudges
+  can no longer leave an idle session frozen without a resume.
 
   The resume is not a bare `continue`: both nudges ask the model to keep a
   **handoff note** (`~/.claude/limit-watch-marks/<session-id>-<reset>.md` —
@@ -139,8 +145,9 @@ Keep that block when merging, or add the entries to your existing allow list.
 - `~/.claude/limit-watch-tier.json` appears once any session makes a tool
   call; it records the current tier, percentage, slope and projection.
 - Once a session arms, a mark file appears in `~/.claude/limit-watch-marks/`
-  named `<session-id>-<reset-epoch>` (with `.winddown` / `.cancel` variants
-  for the other one-shot nudges, and `.md` for the handoff note), and the
+  named `<session-id>-<reset-epoch>` (with `.winddown` / `.stopblock` /
+  `.cancel` variants for the other one-shot nudges, and `.md` for the
+  handoff note), and the
   status line shows `⏰ resume armed`. A mark with no scheduled cron means
   the CronCreate call was denied — check the allowlist above.
 
