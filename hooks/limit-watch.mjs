@@ -167,11 +167,15 @@ const handoff = `${armMark}.md`;
 // resume prompt if the in-session cron never happened (monster turn straight
 // through 100%) or died with the process. Hook processes inherit the
 // session's environment, so $TMUX/$TMUX_PANE identify the hosting pane.
+// session id and cwd are recorded too, so a pane whose Claude process died
+// can be relaunched with `claude --resume <id>` in the right directory.
 const recordTmuxPane = () => {
   const socket = (process.env.TMUX || '').split(',')[0];
   if (!socket || !process.env.TMUX_PANE) return;
   try {
-    writeFileSync(`${armMark}.tmux`, JSON.stringify({ pane: process.env.TMUX_PANE, socket }), { flag: 'wx' });
+    writeFileSync(`${armMark}.tmux`, JSON.stringify({
+      pane: process.env.TMUX_PANE, socket, session: input.session_id, cwd: input.cwd || process.cwd()
+    }), { flag: 'wx' });
   } catch {}
 };
 const pruneOldMarks = () => {

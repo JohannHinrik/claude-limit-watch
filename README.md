@@ -72,13 +72,25 @@ receives it. So the setup is four small Node scripts:
   turn that blows straight through 100% before CronCreate ever happened, or a
   session whose in-memory cron died with the process. When a tmux-hosted
   session arms, the watchdog drops a `.tmux` sidecar recording the hosting
-  pane (hooks inherit `$TMUX`/`$TMUX_PANE`); five minutes after the reset —
-  strictly later than the cron's two, so it stays the fallback — the resumer
-  checks that the pane still runs a Claude process **and that the limit
-  freeze is visibly on screen** (`capture-pane` against a message pattern),
-  then types the resume prompt, once per window (`.resumed` sidecar). No
-  limit message means the session finished, already resumed, or was replaced
-  by a fresh Claude — all left alone; the check fails toward skipping. If both paths fire, the duplicate costs one
+  pane, socket, session id and cwd (hooks inherit `$TMUX`/`$TMUX_PANE`). Five
+  minutes after the reset — strictly later than the cron's two, so it stays
+  the fallback — it acts on what the pane actually shows:
+
+  | Pane state | Action |
+  |---|---|
+  | Claude running, limit freeze visible (`capture-pane` matches) | dismiss the choice modal with `Escape` if present, then type the resume prompt |
+  | back at a shell — the process exited and took its cron with it | type `claude --resume <session-id>` in the recorded cwd; the prompt follows on the next tick, once the process is up |
+  | anything else, or no limit message | left alone |
+
+  Hitting the limit does not just print a message: Claude Code blocks on a
+  choice modal ("Stop and wait for limit to reset / Ask your admin for more
+  usage"), and a cron cannot fire while the REPL is not idle — which is
+  exactly why an external resumer exists, and why it sends `Escape` before
+  typing. Every outcome is recorded in a `.resumed` sidecar (once per pane
+  per window); the relaunch path only ever types a `claude --resume` command,
+  never a bare prompt, so a shell that is not ours cannot be driven into
+  running something arbitrary. Set `RELAUNCH_DEAD = false` to disable
+  relaunching. If both paths fire, the duplicate costs one
   short reply. When the burn flattens and the cron gets cancelled, the
   sidecar is deleted too — deterministically, since unlike the cron it needs
   no model cooperation. Installed by `install.mjs` (launchd agent
@@ -205,7 +217,9 @@ And in `hooks/limit-resume.mjs`:
 |---|---|---|
 | `RESUME_AFTER_S` | 300 | how long after the reset the tmux fallback types the resume (keep above `FIRE_AFTER_S` so the in-session cron goes first) |
 | `LIMIT_RE` | (pattern) | the on-screen limit message that must be visible before the resume is typed; update here if Claude Code's wording changes |
+| `MODAL_RE` | (pattern) | the blocking choice modal, dismissed with `Escape` before typing |
 | `CAPTURE_LINES` | 2000 | scrollback depth searched for that message |
+| `RELAUNCH_DEAD` | true | relaunch `claude --resume` when the pane fell back to a shell |
 
 Predictive triggers only fire when the projection also lands *before* the
 window reset — a burst that would coast past the reset boundary is left
@@ -230,11 +244,13 @@ immediately, no reload needed.
   extrapolate from less than a 2% rise, so very short bursts fall back to
   the window-average pace, and below `PACE_MIN_ELAPSED_S` of elapsed window,
   to the static thresholds.
-- CronCreate jobs live in the session's memory. The session process must stay
-  alive (terminal, tmux pane or background job still open) until the cron
-  fires, and its permission mode must allow the Cron tools. The tmux fallback
-  resumer is the safety net for both constraints — but only for sessions
-  running inside tmux on a machine with the launchd agent installed.
+- CronCreate jobs live in the session's memory, and only fire while the REPL
+  is idle — so a session parked on the limit modal, or one whose process
+  exited, never runs its own resume. Its permission mode must also allow the
+  Cron tools. The tmux fallback resumer is the safety net for all of these —
+  but only for sessions running inside tmux on a machine with the launchd
+  agent installed. Outside tmux, a session that dies at the limit cannot be
+  resumed by anything here.
 - Each session past the arm tier schedules its own resume. A session that
   finishes early is asked to cancel its cron only when the burn rate visibly
   flattened; one that finishes while still above the arm threshold keeps its
