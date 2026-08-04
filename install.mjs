@@ -36,6 +36,7 @@ async function confirm(q, def = true) {
 // shell:true on Windows so npm's claude.cmd shim resolves.
 const win = process.platform === 'win32';
 const run = (cmd, args) => spawnSync(cmd, args, { stdio: 'inherit', shell: win }).status === 0;
+const runQuiet = (cmd, args) => spawnSync(cmd, args, { stdio: 'ignore', shell: win }).status === 0;
 const has = (cmd) => spawnSync(cmd, ['--version'], { stdio: 'ignore', shell: win }).status === 0;
 
 // Command written into settings: tilde form on POSIX (matches the docs and
@@ -274,6 +275,57 @@ if (missingPerms.length) {
   console.log('it when a task finishes before the limit. Non-prompting permission modes');
   console.log('silently deny non-allowlisted tools.');
   if (await confirm(`Add ${missingPerms.join(', ')} to permissions.allow?`)) addPerms = missingPerms;
+}
+
+// --- 3b. External tmux fallback resumer (macOS launchd) ---
+// Covers what no in-session mechanism can: a monster turn that blows through
+// 100% before CronCreate ever happened, or a session whose cron died with the
+// process. The watchdog records the hosting tmux pane when it arms;
+// limit-resume.mjs, run by launchd once a minute, types the resume prompt
+// into panes whose window has reset. Only offered where it can work: the
+// watchdog is installed, the platform has launchd, and tmux is present.
+const LAUNCHD_LABEL = 'com.limit-watch.tmux-resumer';
+if (watchdogActive && process.platform === 'darwin') {
+  if (!has('tmux')) {
+    console.log('\n(tmux not found — skipping the tmux fallback resumer. It resumes');
+    console.log('sessions that froze before their cron was created; install tmux and');
+    console.log('re-run this installer to add it.)');
+  } else {
+    const plistPath = join(homedir(), 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
+    const q = existsSync(plistPath)
+      ? '\nRefresh the tmux fallback resumer (launchd agent)?'
+      : '\nInstall the tmux fallback resumer? (launchd agent, checks once a minute, types the resume prompt into tmux panes whose session froze at 100% without its cron)';
+    if (await confirm(q)) {
+      await installScript('limit-resume.mjs');
+      if (existsSync(join(hooksDir, 'limit-resume.mjs'))) {
+        const tmuxPath = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout?.trim();
+        const pathEnv = `${tmuxPath ? dirname(tmuxPath) + ':' : ''}/usr/bin:/bin`;
+        const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key><array>
+    <string>${process.execPath}</string>
+    <string>${join(hooksDir, 'limit-resume.mjs')}</string>
+  </array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${pathEnv}</string></dict>
+</dict></plist>
+`;
+        mkdirSync(dirname(plistPath), { recursive: true });
+        writeFileSync(plistPath, plist);
+        const domain = `gui/${process.getuid()}`;
+        runQuiet('launchctl', ['bootout', `${domain}/${LAUNCHD_LABEL}`]); // stale agent from a previous run; absent is fine
+        if (runQuiet('launchctl', ['bootstrap', domain, plistPath])) {
+          console.log(`Resumer installed. Remove with: launchctl bootout ${domain}/${LAUNCHD_LABEL} && rm '${plistPath}'`);
+        } else {
+          console.log(`Wrote ${plistPath}, but 'launchctl bootstrap' failed;`);
+          console.log(`load it manually with: launchctl bootstrap ${domain} '${plistPath}'`);
+        }
+      }
+    }
+  }
 }
 
 // --- 4. Apply decisions to a fresh read of settings.json ---

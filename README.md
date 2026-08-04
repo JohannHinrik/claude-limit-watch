@@ -15,7 +15,7 @@ agents.
 ## How it works
 
 Claude Code never passes rate-limit data to hooks. Only the status line
-receives it. So the setup is three small Node scripts:
+receives it. So the setup is four small Node scripts:
 
 - `hooks/limit-statusline.mjs` renders a status line (model, directory,
   5-hour and 7-day usage with reset times, plus wind-down/gate flags) and, on
@@ -58,6 +58,20 @@ receives it. So the setup is three small Node scripts:
   reason telling the model to work inline or wait for the reset; agents
   already running finish normally. It fails open (missing/stale tier file
   gates nothing) and can be disabled with `LIMIT_WATCH_NO_GATE=1`.
+- `hooks/limit-resume.mjs` is the **external tmux fallback** — the only piece
+  that runs *outside* Claude Code (launchd on macOS, once a minute; cron it
+  yourself elsewhere). It covers what no in-session mechanism can: a monster
+  turn that blows straight through 100% before CronCreate ever happened, or a
+  session whose in-memory cron died with the process. When a tmux-hosted
+  session arms, the watchdog drops a `.tmux` sidecar recording the hosting
+  pane (hooks inherit `$TMUX`/`$TMUX_PANE`); five minutes after the reset —
+  strictly later than the cron's two, so it stays the fallback — the resumer
+  types the resume prompt into panes still running a Claude process, once per
+  window (`.resumed` sidecar). If both paths fire, the duplicate costs one
+  short reply. When the burn flattens and the cron gets cancelled, the
+  sidecar is deleted too — deterministically, since unlike the cron it needs
+  no model cooperation. Installed by `install.mjs` (launchd agent
+  `com.limit-watch.tmux-resumer`); it cannot ship in the plugin.
 
 Everything is account-global by construction: the cache, history, and tier
 files live in `~/.claude/`, so every session on the machine — including
@@ -191,7 +205,9 @@ immediately, no reload needed.
   static thresholds.
 - CronCreate jobs live in the session's memory. The session process must stay
   alive (terminal, tmux pane or background job still open) until the cron
-  fires, and its permission mode must allow the Cron tools.
+  fires, and its permission mode must allow the Cron tools. The tmux fallback
+  resumer is the safety net for both constraints — but only for sessions
+  running inside tmux on a machine with the launchd agent installed.
 - Each session past the arm tier schedules its own resume. A session that
   finishes early is asked to cancel its cron only when the burn rate visibly
   flattened; one that finishes while still above the arm threshold keeps its

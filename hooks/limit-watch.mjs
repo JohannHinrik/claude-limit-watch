@@ -136,6 +136,18 @@ const armMark = join(markDir, `${input.session_id || 'unknown'}-${resets}`);
 // Handoff note the model is asked to write; the resume cron's prompt points
 // back at it. The .md suffix still matches pruneOldMarks' window regex.
 const handoff = `${armMark}.md`;
+// tmux-hosted sessions also get a .tmux sidecar on arm, recording the pane
+// so the external fallback resumer (limit-resume.mjs, launchd) can type the
+// resume prompt if the in-session cron never happened (monster turn straight
+// through 100%) or died with the process. Hook processes inherit the
+// session's environment, so $TMUX/$TMUX_PANE identify the hosting pane.
+const recordTmuxPane = () => {
+  const socket = (process.env.TMUX || '').split(',')[0];
+  if (!socket || !process.env.TMUX_PANE) return;
+  try {
+    writeFileSync(`${armMark}.tmux`, JSON.stringify({ pane: process.env.TMUX_PANE, socket }), { flag: 'wx' });
+  } catch {}
+};
 const pruneOldMarks = () => {
   try {
     for (const f of readdirSync(markDir)) {
@@ -161,6 +173,9 @@ if (event === 'Stop' && !input.stop_hook_active && (tier === 'none' || tier === 
   try {
     statSync(armMark);
     writeFileSync(`${armMark}.cancel`, '', { flag: 'wx' });
+    // The external tmux resume is equally unneeded now; unlike the cron it
+    // can be revoked deterministically, no model cooperation required.
+    rmSync(`${armMark}.tmux`, { force: true });
     process.stdout.write(JSON.stringify({
       decision: 'block',
       reason: `[limit-watch] The burn rate flattened: the 5-hour window is at ${pctR}% and no longer projected to hit 100% before it resets. If the task you scheduled the limit-watch resume cron for is fully complete, cancel that cron now with CronDelete (its job id is in your earlier CronCreate result; use CronList if you no longer have it), then stop. If work remains, or the cron is already gone, or Cron tools are unavailable, just stop.`
@@ -205,6 +220,7 @@ if (event === 'Stop') {
     try {
       writeFileSync(`${armMark}.stopblock`, '', { flag: 'wx' });
       try { writeFileSync(armMark, '', { flag: 'wx' }); } catch {}
+      recordTmuxPane();
       pruneOldMarks();
       process.stdout.write(JSON.stringify({
         decision: 'block',
@@ -224,6 +240,7 @@ try {
 } catch {
   try { writeFileSync(armMark, '', { flag: 'wx' }); } catch { process.exit(0); }
 }
+recordTmuxPane();
 pruneOldMarks();
 
 const msg = `[limit-watch] The 5-hour usage window is at ${pctR}% used${projNote} and this session may freeze at 100% before finishing. As your VERY NEXT tool call, before anything else, call CronCreate with schedule \`${cron}\`, recurring false, and prompt \`${cronPrompt}\` That fires at ${hh}:${mm}, 2 minutes after the window resets, and resumes this session. If you already created this exact cron for this reset window, do not create a duplicate; if CronCreate is not in your toolset, ignore this message. Right after the CronCreate, write (or refresh) the handoff note at \`${handoff}\`: the task in progress, what is already done, and the exact next step — and keep it current as work advances. Then keep working while budget remains, preferring to finish in-flight work over starting new subagent fan-outs.`;
